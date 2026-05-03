@@ -1,5 +1,5 @@
 import React from "react";
-import { Animated, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import { CATEGORY_COLORS } from "@/components/DonutChart";
 import { CATEGORY_ICONS } from "@/components/TransactionItem";
 import { useColors } from "@/hooks/useColors";
@@ -19,7 +19,6 @@ function barColor(pct: number): string {
 export function BudgetBar({ category, spent, limit }: Props) {
   const colors = useColors();
   const pct = limit > 0 ? Math.min(spent / limit, 1) : 0;
-  const accent = CATEGORY_COLORS[category] ?? "#00D4FF";
   const fill = barColor(pct);
   const over = spent > limit;
 
@@ -64,9 +63,7 @@ export function BudgetBar({ category, spent, limit }: Props) {
 }
 
 const styles = StyleSheet.create({
-  row: {
-    marginBottom: 14,
-  },
+  row: { marginBottom: 14 },
   topRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -79,37 +76,17 @@ const styles = StyleSheet.create({
     gap: 6,
     flex: 1,
   },
-  icon: {
-    fontSize: 15,
-    width: 20,
-    textAlign: "center",
-  },
+  icon: { fontSize: 15, width: 20, textAlign: "center" },
   catName: {
     fontSize: 13,
     fontFamily: "Inter_500Medium",
     flex: 1,
   },
-  amtGroup: {
-    flexDirection: "row",
-    alignItems: "baseline",
-  },
-  spent: {
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-  },
-  limit: {
-    fontSize: 12,
-    fontFamily: "Inter_400Regular",
-  },
-  track: {
-    height: 6,
-    borderRadius: 3,
-    overflow: "hidden",
-  },
-  fill: {
-    height: 6,
-    borderRadius: 3,
-  },
+  amtGroup: { flexDirection: "row", alignItems: "baseline" },
+  spent: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
+  limit: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  track: { height: 6, borderRadius: 3, overflow: "hidden" },
+  fill: { height: 6, borderRadius: 3 },
   overText: {
     fontSize: 11,
     fontFamily: "Inter_400Regular",

@@ -51,7 +51,7 @@ export function categorize(merchant: string): string {
   return "Other";
 }
 
-// ─── AsyncStorage (web) implementation ───────────────────────────────────────
+// ─── AsyncStorage helpers ─────────────────────────────────────────────────────
 
 const AS_TX_KEY = "vault_transactions";
 const AS_INV_KEY = "vault_investments";
@@ -69,15 +69,24 @@ async function asSetAll<T>(key: string, items: T[]): Promise<void> {
 // ─── SQLite (native) implementation ──────────────────────────────────────────
 
 type SQLiteDb = import("expo-sqlite").SQLiteDatabase;
-let _db: SQLiteDb | null = null;
 
-async function getNativeDb(): Promise<SQLiteDb> {
-  if (!_db) {
-    const SQLite = await import("expo-sqlite");
-    _db = await SQLite.openDatabaseAsync("myvault.db");
-    await initSchema(_db);
-  }
-  return _db;
+// Single promise so SQLite is only opened once; resolves to null if unavailable
+const _dbPromise: Promise<SQLiteDb | null> =
+  Platform.OS === "web"
+    ? Promise.resolve(null)
+    : (async () => {
+        try {
+          const SQLite = await import("expo-sqlite");
+          const db = await SQLite.openDatabaseAsync("myvault.db");
+          await initSchema(db);
+          return db;
+        } catch {
+          return null; // Expo Go or restricted environment — fall back to AsyncStorage
+        }
+      })();
+
+async function getDb(): Promise<SQLiteDb | null> {
+  return _dbPromise;
 }
 
 async function initSchema(db: SQLiteDb) {
@@ -126,7 +135,9 @@ export async function insertTransactions(
     source_type?: string;
   }>
 ): Promise<number> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+
+  if (!db) {
     const existing = await asGetAll<Transaction>(AS_TX_KEY);
     const next = txs.map((tx) => ({
       id: genId(),
@@ -144,7 +155,6 @@ export async function insertTransactions(
     return next.length;
   }
 
-  const db = await getNativeDb();
   let inserted = 0;
   await db.withTransactionAsync(async () => {
     for (const tx of txs) {
@@ -165,27 +175,28 @@ export async function insertTransactions(
 }
 
 export async function getTransactions(limit = 200): Promise<Transaction[]> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const all = await asGetAll<Transaction>(AS_TX_KEY);
     return all.sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
   }
-  const db = await getNativeDb();
   return db.getAllAsync<Transaction>(
     "SELECT * FROM transactions ORDER BY date DESC LIMIT ?", [limit]
   );
 }
 
 export async function deleteAllTransactions(): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     await asSetAll(AS_TX_KEY, []);
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync("DELETE FROM transactions");
 }
 
 export async function getMonthlyCashflow(): Promise<MonthlyCashflow[]> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const all = await asGetAll<Transaction>(AS_TX_KEY);
     const byMonth: Record<string, { credits: number; debits: number }> = {};
     for (const tx of all) {
@@ -199,7 +210,6 @@ export async function getMonthlyCashflow(): Promise<MonthlyCashflow[]> {
       .slice(0, 6)
       .map(([month, v]) => ({ month, credits: +v.credits.toFixed(2), debits: +v.debits.toFixed(2) }));
   }
-  const db = await getNativeDb();
   return db.getAllAsync<MonthlyCashflow>(
     `SELECT strftime('%Y-%m', date) as month,
       ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE 0 END),2) as credits,
@@ -209,7 +219,8 @@ export async function getMonthlyCashflow(): Promise<MonthlyCashflow[]> {
 }
 
 export async function getTotals(): Promise<{ totalCredits: number; totalDebits: number; balance: number }> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const all = await asGetAll<Transaction>(AS_TX_KEY);
     let credits = 0, debits = 0;
     for (const tx of all) {
@@ -218,7 +229,6 @@ export async function getTotals(): Promise<{ totalCredits: number; totalDebits: 
     }
     return { totalCredits: +credits.toFixed(2), totalDebits: +debits.toFixed(2), balance: +(credits - debits).toFixed(2) };
   }
-  const db = await getNativeDb();
   const row = await db.getFirstAsync<{ credits: number; debits: number }>(
     `SELECT ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE 0 END),2) as credits,
             ROUND(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END),2) as debits
@@ -229,20 +239,18 @@ export async function getTotals(): Promise<{ totalCredits: number; totalDebits: 
 }
 
 export async function getInvestments(): Promise<Investment[]> {
-  if (Platform.OS === "web") {
-    return asGetAll<Investment>(AS_INV_KEY);
-  }
-  const db = await getNativeDb();
+  const db = await getDb();
+  if (!db) return asGetAll<Investment>(AS_INV_KEY);
   return db.getAllAsync<Investment>("SELECT * FROM investments ORDER BY broker_name, ticker");
 }
 
 export async function insertInvestment(inv: Omit<Investment, "id" | "created_at">): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const existing = await asGetAll<Investment>(AS_INV_KEY);
     await asSetAll(AS_INV_KEY, [...existing, { ...inv, id: genId(), created_at: Date.now() }]);
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync(
     `INSERT INTO investments (id, broker_name, source_type, ticker, shares, avg_price, currency, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -251,41 +259,41 @@ export async function insertInvestment(inv: Omit<Investment, "id" | "created_at"
 }
 
 export async function deleteInvestment(id: string): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const existing = await asGetAll<Investment>(AS_INV_KEY);
     await asSetAll(AS_INV_KEY, existing.filter((i) => i.id !== id));
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync("DELETE FROM investments WHERE id = ?", [id]);
 }
 
 export async function deleteInvestmentsByBroker(brokerName: string): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const existing = await asGetAll<Investment>(AS_INV_KEY);
     await asSetAll(AS_INV_KEY, existing.filter((i) => !(i.broker_name === brokerName && i.source_type === "Statement")));
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync("DELETE FROM investments WHERE broker_name = ? AND source_type = 'Statement'", [brokerName]);
 }
 
 export async function getSetting(key: string, fallback = ""): Promise<string> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const raw = await AsyncStorage.getItem(`${AS_SETTINGS_KEY}_${key}`);
     return raw ?? fallback;
   }
-  const db = await getNativeDb();
   const row = await db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key = ?", [key]);
   return row?.value ?? fallback;
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     await AsyncStorage.setItem(`${AS_SETTINGS_KEY}_${key}`, value);
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, value]);
 }
 
@@ -296,11 +304,11 @@ export interface CategoryTotal {
 }
 
 export async function getCategoryBreakdown(): Promise<CategoryTotal[]> {
+  const db = await getDb();
   let all: Transaction[];
-  if (Platform.OS === "web") {
+  if (!db) {
     all = await asGetAll<Transaction>(AS_TX_KEY);
   } else {
-    const db = await getNativeDb();
     all = await db.getAllAsync<Transaction>("SELECT * FROM transactions WHERE type = 'debit'");
   }
 
@@ -323,13 +331,13 @@ export async function getCategoryBreakdown(): Promise<CategoryTotal[]> {
 }
 
 export async function updateTransactionCategory(id: string, category: string): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const all = await asGetAll<Transaction>(AS_TX_KEY);
     const updated = all.map((tx) => (tx.id === id ? { ...tx, category } : tx));
     await asSetAll(AS_TX_KEY, updated);
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync("UPDATE transactions SET category = ? WHERE id = ?", [category, id]);
 }
 
@@ -338,7 +346,8 @@ export async function updateTransactionCategory(id: string, category: string): P
 export async function getBudgets(): Promise<Record<string, number>> {
   const prefix = "budget_";
   const result: Record<string, number> = {};
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const keys = await AsyncStorage.getAllKeys();
     for (const k of keys) {
       if (k.startsWith(`${AS_SETTINGS_KEY}_${prefix}`)) {
@@ -349,7 +358,6 @@ export async function getBudgets(): Promise<Record<string, number>> {
     }
     return result;
   }
-  const db = await getNativeDb();
   const rows = await db.getAllAsync<{ key: string; value: string }>(
     "SELECT key, value FROM settings WHERE key LIKE 'budget_%'"
   );
@@ -365,11 +373,11 @@ export async function setBudget(category: string, limit: number): Promise<void> 
 }
 
 export async function deleteBudget(category: string): Promise<void> {
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     await AsyncStorage.removeItem(`${AS_SETTINGS_KEY}_budget_${category}`);
     return;
   }
-  const db = await getNativeDb();
   await db.runAsync("DELETE FROM settings WHERE key = ?", [`budget_${category}`]);
 }
 
@@ -379,10 +387,10 @@ export interface MonthSpend {
 }
 
 export async function getThisMonthCategorySpend(): Promise<Record<string, number>> {
-  const month = new Date().toISOString().substring(0, 7); // e.g. "2026-05"
+  const month = new Date().toISOString().substring(0, 7);
   const result: Record<string, number> = {};
-
-  if (Platform.OS === "web") {
+  const db = await getDb();
+  if (!db) {
     const all = await asGetAll<Transaction>(AS_TX_KEY);
     for (const tx of all) {
       if (tx.type !== "debit") continue;
@@ -391,7 +399,6 @@ export async function getThisMonthCategorySpend(): Promise<Record<string, number
     }
     return result;
   }
-  const db = await getNativeDb();
   const rows = await db.getAllAsync<{ category: string; spent: number }>(
     `SELECT category, ROUND(SUM(amount), 2) as spent
      FROM transactions

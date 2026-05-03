@@ -29,6 +29,12 @@ import {
   updateTransactionCategory,
   type Transaction,
 } from "@/lib/database";
+import {
+  cancelReminder,
+  getReminderSettings,
+  requestNotificationPermissions,
+  scheduleMonthlyReminder,
+} from "@/lib/notifications";
 import { useColors } from "@/hooks/useColors";
 
 interface ParsedTx {
@@ -166,14 +172,57 @@ export default function AccountsScreen() {
   const [filter, setFilter] = useState<"all" | "credit" | "debit">("all");
 
   const [recatTx, setRecatTx] = useState<Transaction | null>(null);
+  const [reminderEnabled, setReminderEnabled] = useState(false);
+  const [reminderDay, setReminderDay] = useState(1);
+  const [showDayPicker, setShowDayPicker] = useState(false);
 
   const load = useCallback(async () => {
-    const [txs, tot] = await Promise.all([getTransactions(500), getTotals()]);
+    const [txs, tot, reminder] = await Promise.all([
+      getTransactions(500),
+      getTotals(),
+      getReminderSettings(),
+    ]);
     setTransactions(txs);
     setTotals(tot);
+    setReminderEnabled(reminder.enabled);
+    setReminderDay(reminder.day);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  async function toggleReminder() {
+    if (Platform.OS === "web") {
+      Alert.alert("Not available", "Push notifications require the mobile app.");
+      return;
+    }
+    if (!reminderEnabled) {
+      const granted = await requestNotificationPermissions();
+      if (!granted) {
+        Alert.alert("Permission denied", "Enable notifications in your device settings to use this feature.");
+        return;
+      }
+      await scheduleMonthlyReminder(reminderDay);
+      setReminderEnabled(true);
+      Alert.alert("Reminder set", `You'll be reminded on the ${reminderDay}${ordinal(reminderDay)} of each month to upload your statement.`);
+    } else {
+      await cancelReminder();
+      setReminderEnabled(false);
+    }
+  }
+
+  async function applyReminderDay(day: number) {
+    setReminderDay(day);
+    setShowDayPicker(false);
+    if (reminderEnabled) {
+      await scheduleMonthlyReminder(day);
+    }
+  }
+
+  function ordinal(n: number): string {
+    const s = ["th", "st", "nd", "rd"];
+    const v = n % 100;
+    return s[(v - 20) % 10] || s[v] || s[0];
+  }
 
   async function handleUpload() {
     try {
@@ -190,13 +239,13 @@ export default function AccountsScreen() {
       const ext = asset.name.toLowerCase().split(".").pop();
 
       if (ext === "csv") {
-        const text = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.UTF8 });
+        const text = await FileSystem.readAsStringAsync(asset.uri, { encoding: "utf8" as any });
         const parsed = parseCSV(text);
         setPreviewTxs(parsed);
         setPreviewVisible(true);
       } else if (ext === "pdf") {
         const domain = process.env.EXPO_PUBLIC_DOMAIN;
-        const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+        const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: "base64" as any });
         const response = await fetch(`https://${domain}/api/parse-pdf`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -336,7 +385,82 @@ export default function AccountsScreen() {
             ))
           )}
         </GlassCard>
+
+        {/* ── Monthly reminder card ── */}
+        <GlassCard padding={16} style={{ marginBottom: 16 }}>
+          <View style={styles.reminderHeader}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
+              <Feather name="bell" size={16} color={colors.primary} />
+              <Text style={[styles.reminderTitle, { color: colors.foreground }]}>Monthly Reminder</Text>
+            </View>
+            <TouchableOpacity
+              style={[
+                styles.togglePill,
+                { backgroundColor: reminderEnabled ? colors.primary : "rgba(255,255,255,0.08)" },
+              ]}
+              onPress={toggleReminder}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.toggleText, { color: reminderEnabled ? colors.background : colors.mutedForeground }]}>
+                {reminderEnabled ? "ON" : "OFF"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={[styles.reminderSub, { color: colors.mutedForeground }]}>
+            Get notified each month to upload your latest bank statement
+          </Text>
+          {reminderEnabled && (
+            <TouchableOpacity
+              style={[styles.dayRow, { borderColor: colors.border }]}
+              onPress={() => setShowDayPicker(true)}
+            >
+              <Feather name="calendar" size={14} color={colors.mutedForeground} />
+              <Text style={[styles.dayText, { color: colors.foreground }]}>
+                Remind me on the{" "}
+                <Text style={{ color: colors.primary }}>
+                  {reminderDay}{ordinal(reminderDay)}
+                </Text>{" "}
+                of each month
+              </Text>
+              <Feather name="chevron-right" size={14} color={colors.mutedForeground} />
+            </TouchableOpacity>
+          )}
+        </GlassCard>
       </ScrollView>
+
+      {/* ── Day picker modal ── */}
+      <Modal visible={showDayPicker} animationType="slide" transparent presentationStyle="pageSheet">
+        <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
+          <View style={styles.modalHandle} />
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>Choose Reminder Day</Text>
+          <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+            Pick the day of the month you'd like to be reminded
+          </Text>
+          <ScrollView contentContainerStyle={styles.dayGrid}>
+            {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+              <TouchableOpacity
+                key={d}
+                style={[
+                  styles.dayChip,
+                  d === reminderDay && { backgroundColor: colors.primary },
+                  { borderColor: colors.border },
+                ]}
+                onPress={() => applyReminderDay(d)}
+              >
+                <Text style={[styles.dayChipText, { color: d === reminderDay ? colors.background : colors.foreground }]}>
+                  {d}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <TouchableOpacity
+            style={[styles.cancelFullBtn, { borderColor: colors.border, marginBottom: 32 }]}
+            onPress={() => setShowDayPicker(false)}
+          >
+            <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
 
       {/* ── Import preview modal ── */}
       <Modal visible={previewVisible} animationType="slide" transparent presentationStyle="pageSheet">
@@ -599,5 +723,73 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 15,
     fontFamily: "Inter_500Medium",
+  },
+  reminderHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  reminderTitle: {
+    fontSize: 15,
+    fontFamily: "Inter_600SemiBold",
+  },
+  reminderSub: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    lineHeight: 18,
+  },
+  togglePill: {
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 20,
+  },
+  toggleText: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0.5,
+  },
+  dayRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  dayText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+  },
+  dayGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    paddingHorizontal: 20,
+    gap: 10,
+    paddingBottom: 20,
+  },
+  dayChip: {
+    width: 52,
+    height: 52,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  dayChipText: {
+    fontSize: 16,
+    fontFamily: "Inter_500Medium",
+  },
+  cancelFullBtn: {
+    marginHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+    borderWidth: 1,
   },
 });

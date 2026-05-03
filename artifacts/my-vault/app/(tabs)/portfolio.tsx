@@ -66,10 +66,10 @@ const CURRENCIES = ["USD", "GBP", "EUR", "CHF", "JPY", "CAD", "AUD"];
 export default function PortfolioScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const [investments, setInvestments] = useState<Investment[]>([]);
   const [holdings, setHoldings] = useState<HoldingWithPrice[]>([]);
   const [loading, setLoading] = useState(false);
-  const [homeCurrency, setHomeCurrency] = useState("USD");
+  const [adding, setAdding] = useState(false);
+  const [homeCurrency, setHomeCurrency] = useState("GBP");
   const [totalValue, setTotalValue] = useState(0);
   const [totalCost, setTotalCost] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
@@ -77,15 +77,16 @@ export default function PortfolioScreen() {
   const [form, setForm] = useState({
     ticker: "",
     shares: "",
-    avg_price: "",
     currency: "USD",
     broker_name: "",
   });
 
   const loadAndPrice = useCallback(async () => {
     setLoading(true);
-    const [invs, savedCurrency] = await Promise.all([getInvestments(), getSetting("home_currency", "USD")]);
-    setInvestments(invs);
+    const [invs, savedCurrency] = await Promise.all([
+      getInvestments(),
+      getSetting("home_currency", "GBP"),
+    ]);
     const hc = savedCurrency;
     setHomeCurrency(hc);
 
@@ -108,14 +109,13 @@ export default function PortfolioScreen() {
     const priceMap = Object.fromEntries(prices);
     const rateMap = Object.fromEntries(rates);
 
-    let tv = 0;
-    let tc = 0;
+    let tv = 0, tc = 0;
 
     const enriched: HoldingWithPrice[] = invs.map((inv) => {
       const currentPrice = priceMap[inv.ticker] ?? null;
       const rate = rateMap[inv.currency] ?? 1;
       const cost = inv.shares * inv.avg_price;
-      tc += cost;
+      tc += cost * rate;
       if (currentPrice !== null) {
         const mv = inv.shares * currentPrice;
         const mvHome = mv * rate;
@@ -125,7 +125,7 @@ export default function PortfolioScreen() {
           currentPrice,
           marketValue: mv,
           pnl: mv - cost,
-          pnlPct: ((mv - cost) / cost) * 100,
+          pnlPct: cost > 0 ? ((mv - cost) / cost) * 100 : 0,
           valueInHomeCurrency: mvHome,
         };
       }
@@ -143,11 +143,28 @@ export default function PortfolioScreen() {
   async function addInvestment() {
     const ticker = form.ticker.toUpperCase().trim();
     const shares = parseFloat(form.shares);
-    const avgPrice = parseFloat(form.avg_price);
     const broker = form.broker_name.trim() || "Manual";
 
-    if (!ticker || isNaN(shares) || shares <= 0 || isNaN(avgPrice) || avgPrice <= 0) {
-      Alert.alert("Invalid input", "Please fill in all fields correctly.");
+    if (!ticker || isNaN(shares) || shares <= 0) {
+      Alert.alert("Invalid input", "Please enter a ticker symbol and number of shares.");
+      return;
+    }
+
+    setAdding(true);
+    let livePrice: number | null = null;
+    try {
+      livePrice = await fetchPrice(ticker);
+    } catch {
+      livePrice = null;
+    }
+
+    if (livePrice === null) {
+      Alert.alert(
+        "Price not found",
+        `Could not fetch a live price for "${ticker}". Check the ticker symbol and try again.`,
+        [{ text: "OK" }]
+      );
+      setAdding(false);
       return;
     }
 
@@ -156,13 +173,14 @@ export default function PortfolioScreen() {
       source_type: "Manual",
       ticker,
       shares,
-      avg_price: avgPrice,
+      avg_price: livePrice,
       currency: form.currency,
     });
 
-    setForm({ ticker: "", shares: "", avg_price: "", currency: "USD", broker_name: "" });
+    setForm({ ticker: "", shares: "", currency: "USD", broker_name: "" });
     setShowAdd(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setAdding(false);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     await loadAndPrice();
   }
 
@@ -174,7 +192,7 @@ export default function PortfolioScreen() {
         style: "destructive",
         onPress: async () => {
           await deleteInvestment(id);
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           await loadAndPrice();
         },
       },
@@ -182,6 +200,7 @@ export default function PortfolioScreen() {
   }
 
   async function changeHomeCurrency(currency: string) {
+    setHomeCurrency(currency);
     await setSetting("home_currency", currency);
     await loadAndPrice();
   }
@@ -203,12 +222,12 @@ export default function PortfolioScreen() {
           <View>
             <Text style={[styles.screenTitle, { color: colors.foreground }]}>Portfolio</Text>
             <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>
-              {holdings.length} holdings
+              {holdings.length} holding{holdings.length !== 1 ? "s" : ""}
             </Text>
           </View>
           <View style={styles.headerActions}>
-            <TouchableOpacity onPress={loadAndPrice} style={styles.iconBtn}>
-              <Feather name="refresh-cw" size={16} color={colors.mutedForeground} />
+            <TouchableOpacity onPress={loadAndPrice} style={styles.iconBtn} disabled={loading}>
+              <Feather name="refresh-cw" size={16} color={loading ? colors.mutedForeground : colors.primary} />
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => setShowAdd(true)}
@@ -219,6 +238,7 @@ export default function PortfolioScreen() {
           </View>
         </View>
 
+        {/* Total portfolio value */}
         <GlassCard style={styles.netWorthCard} padding={20}>
           <Text style={[styles.nwLabel, { color: colors.mutedForeground }]}>Total Portfolio Value</Text>
           {loading ? (
@@ -226,19 +246,23 @@ export default function PortfolioScreen() {
           ) : (
             <>
               <Text style={[styles.nwValue, { color: colors.primary }]}>
-                {homeCurrency} {totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {homeCurrency}{" "}
+                {totalValue.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </Text>
               {totalCost > 0 && (
                 <Text style={[styles.nwPnl, { color: isPnlPositive ? colors.credit : colors.debit }]}>
-                  {isPnlPositive ? "▲" : "▼"} {Math.abs(totalPnlPct).toFixed(2)}%  ({isPnlPositive ? "+" : ""}{totalPnl.toFixed(2)})
+                  {isPnlPositive ? "▲" : "▼"} {Math.abs(totalPnlPct).toFixed(2)}%
+                  {"  "}({isPnlPositive ? "+" : ""}
+                  {homeCurrency} {Math.abs(totalPnl).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
                 </Text>
               )}
             </>
           )}
         </GlassCard>
 
+        {/* Home currency picker */}
         <View style={styles.currencyRow}>
-          <Text style={[styles.currencyLabel, { color: colors.mutedForeground }]}>Home currency:</Text>
+          <Text style={[styles.currencyLabel, { color: colors.mutedForeground }]}>Home:</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             {CURRENCIES.map((c) => (
               <TouchableOpacity
@@ -258,12 +282,13 @@ export default function PortfolioScreen() {
           </ScrollView>
         </View>
 
-        <GlassCard padding={0} style={{ marginBottom: 16 }}>
+        {/* Holdings list */}
+        <GlassCard padding={0} style={{ marginBottom: 12 }}>
           {holdings.length === 0 ? (
             <View style={styles.emptyBox}>
               <Feather name="trending-up" size={28} color={colors.mutedForeground} />
               <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-                Add investments manually or upload a brokerage statement
+                Tap + to add a holding. The current price is used as your cost basis.
               </Text>
             </View>
           ) : (
@@ -274,6 +299,7 @@ export default function PortfolioScreen() {
                   <TouchableOpacity
                     style={styles.holdingRow}
                     onLongPress={() => removeHolding(h.id)}
+                    activeOpacity={0.8}
                   >
                     <View style={[styles.tickerBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
                       <Text style={[styles.tickerText, { color: colors.primary }]}>{h.ticker}</Text>
@@ -281,23 +307,22 @@ export default function PortfolioScreen() {
                     <View style={styles.holdingMiddle}>
                       <Text style={[styles.holdingBroker, { color: colors.foreground }]}>{h.broker_name}</Text>
                       <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>
-                        {h.shares} shares · avg {h.currency} {h.avg_price.toFixed(2)}
+                        {h.shares} shares · {h.currency}
                       </Text>
                     </View>
                     <View style={styles.holdingRight}>
                       {h.currentPrice !== null ? (
                         <>
                           <Text style={[styles.holdingValue, { color: colors.foreground }]}>
-                            {homeCurrency} {(h.valueInHomeCurrency ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            {homeCurrency}{" "}
+                            {(h.valueInHomeCurrency ?? 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </Text>
                           <Text style={[styles.holdingPnl, { color: isUp ? colors.credit : colors.debit }]}>
                             {isUp ? "+" : ""}{(h.pnlPct ?? 0).toFixed(2)}%
                           </Text>
                         </>
                       ) : (
-                        <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>
-                          {h.source_type === "Manual" ? "Manual" : "—"}
-                        </Text>
+                        <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>No price</Text>
                       )}
                     </View>
                   </TouchableOpacity>
@@ -311,31 +336,34 @@ export default function PortfolioScreen() {
         </GlassCard>
 
         <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-          Long-press a holding to remove it
+          Long-press a holding to remove · Prices via Yahoo Finance
         </Text>
       </ScrollView>
 
+      {/* Add holding modal */}
       <Modal visible={showAdd} animationType="slide" transparent presentationStyle="pageSheet">
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
-          <Text style={[styles.modalTitle, { color: colors.foreground }]}>Add Investment</Text>
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>Add Holding</Text>
+          <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+            Today's live price will be used as your cost basis
+          </Text>
 
           {[
-            { label: "Ticker Symbol", key: "ticker", placeholder: "e.g. AAPL", autoCapitalize: "characters" as const },
-            { label: "Shares", key: "shares", placeholder: "e.g. 10.5", keyboardType: "decimal-pad" as const },
-            { label: "Average Price", key: "avg_price", placeholder: "e.g. 142.50", keyboardType: "decimal-pad" as const },
-            { label: "Broker / Account", key: "broker_name", placeholder: "e.g. Schwab" },
-          ].map(({ label, key, placeholder, autoCapitalize, keyboardType }) => (
+            { label: "Ticker Symbol", key: "ticker", placeholder: "e.g. AAPL", autoCapitalize: "characters" as const, keyboard: "default" as const },
+            { label: "Shares", key: "shares", placeholder: "e.g. 10.5", autoCapitalize: "none" as const, keyboard: "decimal-pad" as const },
+            { label: "Broker / Account (optional)", key: "broker_name", placeholder: "e.g. Freetrade", autoCapitalize: "words" as const, keyboard: "default" as const },
+          ].map(({ label, key, placeholder, autoCapitalize, keyboard }) => (
             <View key={key} style={styles.fieldGroup}>
               <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>{label}</Text>
               <TextInput
-                style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.input }]}
+                style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
                 placeholder={placeholder}
                 placeholderTextColor={colors.mutedForeground}
                 value={(form as Record<string, string>)[key]}
                 onChangeText={(v) => setForm((f) => ({ ...f, [key]: v }))}
-                autoCapitalize={autoCapitalize ?? "none"}
-                keyboardType={keyboardType ?? "default"}
+                autoCapitalize={autoCapitalize}
+                keyboardType={keyboard}
               />
             </View>
           ))}
@@ -361,18 +389,23 @@ export default function PortfolioScreen() {
             </ScrollView>
           </View>
 
-          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 16 }]}>
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 20 }]}>
             <TouchableOpacity
               style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
-              onPress={() => setShowAdd(false)}
+              onPress={() => { setShowAdd(false); setForm({ ticker: "", shares: "", currency: "USD", broker_name: "" }); }}
             >
               <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.modalBtn, styles.confirmBtn, { backgroundColor: colors.primary }]}
+              style={[styles.modalBtn, styles.confirmBtn, { backgroundColor: colors.primary, opacity: adding ? 0.7 : 1 }]}
               onPress={addInvestment}
+              disabled={adding}
             >
-              <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>Add</Text>
+              {adding ? (
+                <ActivityIndicator color={colors.background} size="small" />
+              ) : (
+                <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>Add</Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -405,9 +438,7 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     marginTop: 2,
   },
-  iconBtn: {
-    padding: 8,
-  },
+  iconBtn: { padding: 8 },
   addBtn: {
     width: 36,
     height: 36,
@@ -415,9 +446,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  netWorthCard: {
-    marginBottom: 12,
-  },
+  netWorthCard: { marginBottom: 12 },
   nwLabel: {
     fontSize: 13,
     fontFamily: "Inter_400Regular",
@@ -476,9 +505,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontFamily: "Inter_700Bold",
   },
-  holdingMiddle: {
-    flex: 1,
-  },
+  holdingMiddle: { flex: 1 },
   holdingBroker: {
     fontSize: 14,
     fontWeight: "600",
@@ -489,9 +516,7 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     marginTop: 2,
   },
-  holdingRight: {
-    alignItems: "flex-end",
-  },
+  holdingRight: { alignItems: "flex-end" },
   holdingValue: {
     fontSize: 14,
     fontWeight: "600",
@@ -504,8 +529,7 @@ const styles = StyleSheet.create({
   },
   divider: {
     height: StyleSheet.hairlineWidth,
-    marginLeft: 16,
-    marginRight: 16,
+    marginHorizontal: 16,
   },
   emptyBox: {
     padding: 40,
@@ -516,6 +540,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_400Regular",
     textAlign: "center",
+    lineHeight: 20,
   },
   hint: {
     fontSize: 11,
@@ -527,7 +552,7 @@ const styles = StyleSheet.create({
     flex: 1,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    marginTop: 80,
+    marginTop: 100,
     paddingTop: 12,
     paddingHorizontal: 20,
   },
@@ -543,11 +568,14 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "700",
     fontFamily: "Inter_700Bold",
+    marginBottom: 4,
+  },
+  modalSub: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
     marginBottom: 20,
   },
-  fieldGroup: {
-    marginBottom: 14,
-  },
+  fieldGroup: { marginBottom: 14 },
   fieldLabel: {
     fontSize: 12,
     fontFamily: "Inter_500Medium",
@@ -565,6 +593,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     paddingTop: 16,
+    marginTop: "auto",
   },
   modalBtn: {
     flex: 1,
@@ -572,8 +601,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
   },
-  cancelBtn: {
-    borderWidth: 1,
-  },
+  cancelBtn: { borderWidth: 1 },
   confirmBtn: {},
 });
