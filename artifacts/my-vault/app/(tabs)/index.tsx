@@ -21,6 +21,7 @@ import { TransactionItem } from "@/components/TransactionItem";
 import { DonutChart, CategoryLegend, CATEGORY_COLORS } from "@/components/DonutChart";
 import { CATEGORY_ICONS, ALL_CATEGORIES } from "@/components/TransactionItem";
 import { BudgetBar } from "@/components/BudgetBar";
+import { SubscriptionRow } from "@/components/SubscriptionCard";
 import {
   getBudgets,
   setBudget,
@@ -34,6 +35,7 @@ import {
   type MonthlyCashflow,
   type Transaction,
 } from "@/lib/database";
+import { detectSubscriptions, type DetectedSubscription } from "@/lib/subscriptions";
 import { useColors } from "@/hooks/useColors";
 
 const MONTH_SHORT: Record<string, string> = {
@@ -305,22 +307,24 @@ export default function DashboardScreen() {
   const [budgets, setBudgets] = useState<Record<string, number>>({});
   const [monthSpend, setMonthSpend] = useState<Record<string, number>>({});
   const [budgetModalVisible, setBudgetModalVisible] = useState(false);
+  const [subscriptions, setSubscriptions] = useState<DetectedSubscription[]>([]);
 
   const load = useCallback(async () => {
-    const [cf, tx, tot, bk, bg, ms] = await Promise.all([
+    const [cf, allTx, tot, bk, bg, ms] = await Promise.all([
       getMonthlyCashflow(),
-      getTransactions(10),
+      getTransactions(500),
       getTotals(),
       getCategoryBreakdown(),
       getBudgets(),
       getThisMonthCategorySpend(),
     ]);
     setCashflow(cf);
-    setRecent(tx);
+    setRecent(allTx.slice(0, 10));
     setTotals(tot);
     setBreakdown(bk);
     setBudgets(bg);
     setMonthSpend(ms);
+    setSubscriptions(detectSubscriptions(allTx));
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -354,6 +358,8 @@ export default function DashboardScreen() {
   const overBudgetCount = budgetedCategories.filter((c) => (monthSpend[c] ?? 0) > budgets[c]).length;
 
   const currentMonth = new Date().toLocaleString("en-GB", { month: "long", year: "numeric" });
+
+  const totalMonthlySubCost = subscriptions.reduce((s, sub) => s + sub.monthlyEquiv, 0);
 
   return (
     <>
@@ -471,6 +477,41 @@ export default function DashboardScreen() {
           )}
         </GlassCard>
 
+        {/* Subscriptions */}
+        <GlassCard style={styles.chartCard} padding={16}>
+          <View style={styles.chartHeader}>
+            <View>
+              <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Subscriptions</Text>
+              {subscriptions.length > 0 && (
+                <Text style={[styles.subTotalText, { color: colors.mutedForeground }]}>
+                  £{totalMonthlySubCost.toFixed(2)}/mo detected
+                </Text>
+              )}
+            </View>
+            <View style={[styles.subBadge, { backgroundColor: "rgba(225,112,85,0.15)" }]}>
+              <Text style={styles.subBadgeText}>📱 Auto-detected</Text>
+            </View>
+          </View>
+
+          {subscriptions.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={{ fontSize: 24 }}>📱</Text>
+              <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+                No recurring charges detected yet.{"\n"}Import statements to analyse your subscriptions.
+              </Text>
+            </View>
+          ) : (
+            subscriptions.map((sub, i) => (
+              <View key={sub.normalizedKey}>
+                <SubscriptionRow sub={sub} />
+                {i < subscriptions.length - 1 && (
+                  <View style={[styles.divider, { backgroundColor: colors.border, marginLeft: 48 }]} />
+                )}
+              </View>
+            ))
+          )}
+        </GlassCard>
+
         {/* Recent transactions */}
         <GlassCard style={styles.txCard} padding={0}>
           <View style={styles.txHeader}>
@@ -556,4 +597,9 @@ const styles = StyleSheet.create({
   divider: { height: StyleSheet.hairlineWidth, marginLeft: 68, marginRight: 16 },
   emptyBox: { paddingVertical: 24, alignItems: "center", gap: 10 },
   emptyText: { fontSize: 14, fontFamily: "Inter_400Regular", textAlign: "center" },
+  subTotalText: { fontSize: 12, fontFamily: "Inter_400Regular", marginTop: 2 },
+  subBadge: {
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6,
+  },
+  subBadgeText: { fontSize: 11, fontFamily: "Inter_500Medium", color: "#E17055" },
 });

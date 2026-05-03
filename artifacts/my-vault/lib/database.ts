@@ -39,7 +39,8 @@ export function categorize(merchant: string): string {
   const m = merchant.toLowerCase();
   if (/mcdonalds|kfc|subway|pizza|burger|restaurant|cafe|starbucks|costa|tesco|asda|sainsbury|lidl|aldi|waitrose|morrisons|takeaway|sushi|indian|chinese|thai|hasty|lahori|mowgli|taj mahal|streate/.test(m)) return "Food & Dining";
   if (/uber|lyft|trainline|rail|tube|lul\s|tfl|arriva|bus|taxi|transport|parking|petrol|fuel|shell|railcard|ticket machine/.test(m)) return "Transport";
-  if (/netflix|spotify|disney|sky\s|nowtv|twitch|youtube|hbo|apple tv|manchester united|mufc|ticketing/.test(m)) return "Entertainment";
+  if (/netflix|spotify|disney\+|disney plus|apple tv\+|apple one|hbo|paramount|now tv|nowtv|dazn|crunchyroll|mubi|bbc sounds|audible|kindle unlimited|duolingo|headspace|calm|grammarly|1password|lastpass|nordvpn|expressvpn|dropbox|icloud|google one|microsoft 365|office 365|adobe|canva|figma|notion|obsidian|chatgpt|claude|github copilot|cursor|linear|slack|zoom|twitch/.test(m)) return "Subscriptions";
+  if (/sky\s|nowtv|twitch|youtube premium|hbo|manchester united|mufc|ticketing/.test(m)) return "Entertainment";
   if (/amazon|ebay|asos|zara|h&m|primark|jd sports|sports direct|next|argos|currys|john lewis|ikea|shopping|fashion/.test(m)) return "Shopping";
   if (/electricity|gas|water|sse|british gas|e\.on|edf|thames|severn|vodafone|o2|ee\s|three\s|talktalk|broadband|internet/.test(m)) return "Bills & Utilities";
   if (/rent|mortgage|letting|estate agent|benham|reeves/.test(m)) return "Housing";
