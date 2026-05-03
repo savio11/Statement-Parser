@@ -14,10 +14,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { GlassCard } from "@/components/GlassCard";
 import { TransactionItem } from "@/components/TransactionItem";
+import { DonutChart, CategoryLegend } from "@/components/DonutChart";
 import {
+  getCategoryBreakdown,
   getMonthlyCashflow,
   getTransactions,
   getTotals,
+  type CategoryTotal,
   type MonthlyCashflow,
   type Transaction,
 } from "@/lib/database";
@@ -136,16 +139,19 @@ export default function DashboardScreen() {
   const [cashflow, setCashflow] = useState<MonthlyCashflow[]>([]);
   const [recent, setRecent] = useState<Transaction[]>([]);
   const [totals, setTotals] = useState({ totalCredits: 0, totalDebits: 0, balance: 0 });
+  const [breakdown, setBreakdown] = useState<CategoryTotal[]>([]);
 
   const load = useCallback(async () => {
-    const [cf, tx, tot] = await Promise.all([
+    const [cf, tx, tot, bk] = await Promise.all([
       getMonthlyCashflow(),
       getTransactions(10),
       getTotals(),
+      getCategoryBreakdown(),
     ]);
     setCashflow(cf);
     setRecent(tx);
     setTotals(tot);
+    setBreakdown(bk);
   }, []);
 
   useEffect(() => {
@@ -218,6 +224,20 @@ export default function DashboardScreen() {
           </View>
         </View>
         <CashflowChart data={cashflow} />
+      </GlassCard>
+
+      <GlassCard style={styles.chartCard} padding={16}>
+        <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Spending Breakdown</Text>
+        {breakdown.length === 0 ? (
+          <View style={styles.emptyBox}>
+            <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>No spending data yet</Text>
+          </View>
+        ) : (
+          <View style={styles.breakdownRow}>
+            <DonutChart data={breakdown} size={148} />
+            <CategoryLegend data={breakdown} limit={6} />
+          </View>
+        )}
       </GlassCard>
 
       <GlassCard style={styles.txCard} padding={0}>
@@ -322,6 +342,11 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "600",
     fontFamily: "Inter_600SemiBold",
+    marginBottom: 12,
+  },
+  breakdownRow: {
+    flexDirection: "row",
+    alignItems: "center",
   },
   txCard: {
     marginBottom: 10,
@@ -338,7 +363,7 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   emptyBox: {
-    padding: 32,
+    paddingVertical: 24,
     alignItems: "center",
     gap: 10,
   },

@@ -2,14 +2,13 @@ import { Feather } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system";
 import * as Haptics from "expo-haptics";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   Modal,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -19,13 +18,15 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { GlassCard } from "@/components/GlassCard";
-import { TransactionItem } from "@/components/TransactionItem";
+import { TransactionItem, ALL_CATEGORIES, CATEGORY_ICONS } from "@/components/TransactionItem";
+import { CATEGORY_COLORS } from "@/components/DonutChart";
 import {
   categorize,
   deleteAllTransactions,
   getTransactions,
   getTotals,
   insertTransactions,
+  updateTransactionCategory,
   type Transaction,
 } from "@/lib/database";
 import { useColors } from "@/hooks/useColors";
@@ -164,6 +165,8 @@ export default function AccountsScreen() {
   const [totals, setTotals] = useState({ totalCredits: 0, totalDebits: 0, balance: 0 });
   const [filter, setFilter] = useState<"all" | "credit" | "debit">("all");
 
+  const [recatTx, setRecatTx] = useState<Transaction | null>(null);
+
   const load = useCallback(async () => {
     const [txs, tot] = await Promise.all([getTransactions(500), getTotals()]);
     setTransactions(txs);
@@ -237,6 +240,14 @@ export default function AccountsScreen() {
     ]);
   }
 
+  async function handleRecat(category: string) {
+    if (!recatTx) return;
+    await updateTransactionCategory(recatTx.id, category);
+    setRecatTx(null);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    await load();
+  }
+
   const filtered = filter === "all" ? transactions : transactions.filter((t) => t.type === filter);
 
   const topPad = insets.top + (Platform.OS === "web" ? 67 : 0);
@@ -278,7 +289,7 @@ export default function AccountsScreen() {
         </TouchableOpacity>
 
         <Text style={[styles.uploadHint, { color: colors.mutedForeground }]}>
-          Supports PDF and CSV bank statements
+          Tap any transaction to change its category
         </Text>
 
         {transactions.length > 0 && (
@@ -316,7 +327,7 @@ export default function AccountsScreen() {
             filtered.map((tx, i) => (
               <View key={tx.id}>
                 <View style={{ paddingHorizontal: 16 }}>
-                  <TransactionItem tx={tx} />
+                  <TransactionItem tx={tx} onPress={setRecatTx} />
                 </View>
                 {i < filtered.length - 1 && (
                   <View style={[styles.divider, { backgroundColor: colors.border }]} />
@@ -327,6 +338,7 @@ export default function AccountsScreen() {
         </GlassCard>
       </ScrollView>
 
+      {/* ── Import preview modal ── */}
       <Modal visible={previewVisible} animationType="slide" transparent presentationStyle="pageSheet">
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
@@ -381,6 +393,56 @@ export default function AccountsScreen() {
               <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>
                 Save All
               </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Re-categorize modal ── */}
+      <Modal visible={!!recatTx} animationType="slide" transparent presentationStyle="pageSheet">
+        <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
+          <View style={styles.modalHandle} />
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>Change Category</Text>
+          {recatTx && (
+            <Text style={[styles.modalSub, { color: colors.mutedForeground }]} numberOfLines={1}>
+              {recatTx.merchant || recatTx.description}
+            </Text>
+          )}
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 8, paddingBottom: 20 }}>
+            {ALL_CATEGORIES.map((cat) => {
+              const isSelected = recatTx?.category === cat;
+              const color = CATEGORY_COLORS[cat] ?? "#636E72";
+              return (
+                <TouchableOpacity
+                  key={cat}
+                  style={[
+                    styles.catRow,
+                    {
+                      backgroundColor: isSelected ? `${color}22` : "rgba(255,255,255,0.04)",
+                      borderColor: isSelected ? color : "rgba(255,255,255,0.08)",
+                    },
+                  ]}
+                  onPress={() => handleRecat(cat)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.catDot, { backgroundColor: color }]} />
+                  <Text style={styles.catIcon}>{CATEGORY_ICONS[cat] ?? "•"}</Text>
+                  <Text style={[styles.catLabel, { color: isSelected ? color : colors.foreground }]}>
+                    {cat}
+                  </Text>
+                  {isSelected && (
+                    <Feather name="check" size={16} color={color} />
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 16 }]}>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
+              onPress={() => setRecatTx(null)}
+            >
+              <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -513,4 +575,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   confirmBtn: {},
+  catRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+  },
+  catDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  catIcon: {
+    fontSize: 18,
+    width: 24,
+    textAlign: "center",
+  },
+  catLabel: {
+    flex: 1,
+    fontSize: 15,
+    fontFamily: "Inter_500Medium",
+  },
 });

@@ -287,3 +287,47 @@ export async function setSetting(key: string, value: string): Promise<void> {
   const db = await getNativeDb();
   await db.runAsync("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, value]);
 }
+
+export interface CategoryTotal {
+  category: string;
+  total: number;
+  pct: number;
+}
+
+export async function getCategoryBreakdown(): Promise<CategoryTotal[]> {
+  let all: Transaction[];
+  if (Platform.OS === "web") {
+    all = await asGetAll<Transaction>(AS_TX_KEY);
+  } else {
+    const db = await getNativeDb();
+    all = await db.getAllAsync<Transaction>("SELECT * FROM transactions WHERE type = 'debit'");
+  }
+
+  const byCategory: Record<string, number> = {};
+  for (const tx of all) {
+    if (tx.type !== "debit") continue;
+    byCategory[tx.category] = (byCategory[tx.category] ?? 0) + tx.amount;
+  }
+
+  const totalSpend = Object.values(byCategory).reduce((s, v) => s + v, 0);
+  if (totalSpend === 0) return [];
+
+  return Object.entries(byCategory)
+    .map(([category, total]) => ({
+      category,
+      total: +total.toFixed(2),
+      pct: +((total / totalSpend) * 100).toFixed(1),
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+export async function updateTransactionCategory(id: string, category: string): Promise<void> {
+  if (Platform.OS === "web") {
+    const all = await asGetAll<Transaction>(AS_TX_KEY);
+    const updated = all.map((tx) => (tx.id === id ? { ...tx, category } : tx));
+    await asSetAll(AS_TX_KEY, updated);
+    return;
+  }
+  const db = await getNativeDb();
+  await db.runAsync("UPDATE transactions SET category = ? WHERE id = ?", [category, id]);
+}
