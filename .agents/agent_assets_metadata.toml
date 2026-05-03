@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "BSiX1bkCUMo0Lw7GCWyZz"
+uri = "file://artifacts/my-vault/assets/images/icon.png"
+type = "image"
+title = "my vault app icon"

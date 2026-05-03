@@ -1,0 +1,516 @@
+import { Feather } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system";
+import * as Haptics from "expo-haptics";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+
+import { GlassCard } from "@/components/GlassCard";
+import { TransactionItem } from "@/components/TransactionItem";
+import {
+  categorize,
+  deleteAllTransactions,
+  getTransactions,
+  getTotals,
+  insertTransactions,
+  type Transaction,
+} from "@/lib/database";
+import { useColors } from "@/hooks/useColors";
+
+interface ParsedTx {
+  date: string;
+  description: string;
+  merchant: string;
+  amount: number;
+  type: string;
+  category: string;
+}
+
+function parseCSV(text: string): ParsedTx[] {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const header = lines[0].toLowerCase().split(",").map((h) => h.trim().replace(/"/g, ""));
+
+  const getCol = (cols: string[], ...names: string[]) => {
+    for (const n of names) {
+      const i = header.indexOf(n);
+      if (i >= 0) return cols[i]?.trim().replace(/"/g, "") ?? "";
+    }
+    return "";
+  };
+
+  const results: ParsedTx[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const dateRaw = getCol(cols, "date", "transaction date", "value date");
+    if (!dateRaw) continue;
+
+    let date = dateRaw;
+    const dmyMatch = dateRaw.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if (dmyMatch) {
+      const [, d, m, y] = dmyMatch;
+      const year = y.length === 2 ? `20${y}` : y;
+      date = `${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+    }
+
+    const desc = getCol(cols, "description", "transaction description", "details", "reference", "merchant");
+    const paidOut = parseFloat(getCol(cols, "paid out", "debit", "withdrawal", "amount out").replace(/,/g, "") || "0");
+    const paidIn = parseFloat(getCol(cols, "paid in", "credit", "deposit", "amount in").replace(/,/g, "") || "0");
+    let amount = 0;
+    let type = "debit";
+
+    if (paidIn > 0) { amount = paidIn; type = "credit"; }
+    else if (paidOut > 0) { amount = paidOut; type = "debit"; }
+    else {
+      const amtStr = getCol(cols, "amount", "net amount");
+      const amt = parseFloat(amtStr.replace(/,/g, "") || "0");
+      if (amt > 0) { amount = amt; type = "credit"; }
+      else if (amt < 0) { amount = Math.abs(amt); type = "debit"; }
+      else continue;
+    }
+
+    const merchant = desc || "Unknown";
+    results.push({ date, description: merchant, merchant, amount, type, category: categorize(merchant) });
+  }
+  return results;
+}
+
+function parsePDFText(text: string): ParsedTx[] {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const results: ParsedTx[] = [];
+
+  const MONTHS: Record<string, string> = {
+    jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+    jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+  };
+  const dateRe = /^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2,4})/i;
+  const amountRe = /(\d{1,3}(?:,\d{3})*\.\d{2})/g;
+
+  let lastBalance: number | null = null;
+  let pendingDate: string | null = null;
+  let pendingMerchant: string | null = null;
+
+  for (const line of lines) {
+    if (/balance brought forward|balance carried forward|opening balance|closing balance|payments in|payments out|interest rate|information about/i.test(line)) {
+      const bfAmts = [...line.matchAll(amountRe)].map((m) => parseFloat(m[1].replace(/,/g, "")));
+      if (bfAmts.length > 0 && /balance brought forward/i.test(line)) {
+        lastBalance = bfAmts[bfAmts.length - 1];
+      }
+      continue;
+    }
+
+    const dateMatch = line.match(dateRe);
+    if (dateMatch) {
+      const day = dateMatch[1].padStart(2, "0");
+      const month = MONTHS[dateMatch[2].toLowerCase()];
+      const yearRaw = dateMatch[3];
+      const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
+      pendingDate = `${year}-${month}-${day}`;
+
+      const rest = line.substring(dateMatch[0].length).trim();
+      const cleaned = rest.replace(/^(BP|VIS|CR|DD|SO|ATM|CHQ|\)\)\)|CC)\s+/i, "");
+      pendingMerchant = cleaned.trim() || "Transaction";
+    }
+
+    const amounts = [...line.matchAll(amountRe)].map((m) => parseFloat(m[1].replace(/,/g, "")));
+    if (amounts.length > 0 && pendingDate && pendingMerchant) {
+      const balance = amounts[amounts.length - 1];
+
+      if (lastBalance !== null) {
+        const diff = balance - lastBalance;
+        const absAmt = Math.abs(diff);
+        if (absAmt > 0.005 && absAmt < 100000) {
+          const merchant = pendingMerchant;
+          results.push({
+            date: pendingDate,
+            description: merchant,
+            merchant,
+            amount: parseFloat(absAmt.toFixed(2)),
+            type: diff > 0 ? "credit" : "debit",
+            category: categorize(merchant),
+          });
+        }
+      }
+
+      lastBalance = balance;
+      pendingDate = null;
+      pendingMerchant = null;
+    }
+  }
+
+  return results;
+}
+
+export default function AccountsScreen() {
+  const colors = useColors();
+  const insets = useSafeAreaInsets();
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [previewTxs, setPreviewTxs] = useState<ParsedTx[]>([]);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [totals, setTotals] = useState({ totalCredits: 0, totalDebits: 0, balance: 0 });
+  const [filter, setFilter] = useState<"all" | "credit" | "debit">("all");
+
+  const load = useCallback(async () => {
+    const [txs, tot] = await Promise.all([getTransactions(500), getTotals()]);
+    setTransactions(txs);
+    setTotals(tot);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function handleUpload() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["application/pdf", "text/csv", "text/comma-separated-values", "application/vnd.ms-excel"],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled || !result.assets?.length) return;
+
+      const asset = result.assets[0];
+      setUploading(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+      const ext = asset.name.toLowerCase().split(".").pop();
+
+      if (ext === "csv") {
+        const text = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.UTF8 });
+        const parsed = parseCSV(text);
+        setPreviewTxs(parsed);
+        setPreviewVisible(true);
+      } else if (ext === "pdf") {
+        const domain = process.env.EXPO_PUBLIC_DOMAIN;
+        const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+        const response = await fetch(`https://${domain}/api/parse-pdf`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base64, filename: asset.name }),
+        });
+        if (!response.ok) throw new Error("PDF parsing failed");
+        const data = await response.json() as { transactions: ParsedTx[] };
+        setPreviewTxs(data.transactions);
+        setPreviewVisible(true);
+      } else {
+        Alert.alert("Unsupported format", "Please upload a PDF or CSV file.");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      Alert.alert("Upload failed", msg);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function confirmImport() {
+    await insertTransactions(previewTxs);
+    setPreviewVisible(false);
+    setPreviewTxs([]);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    await load();
+  }
+
+  async function clearAll() {
+    Alert.alert("Clear all transactions", "This will delete all imported transactions. Continue?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          await deleteAllTransactions();
+          await load();
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        },
+      },
+    ]);
+  }
+
+  const filtered = filter === "all" ? transactions : transactions.filter((t) => t.type === filter);
+
+  const topPad = insets.top + (Platform.OS === "web" ? 67 : 0);
+  const bottomPad = Platform.OS === "web" ? 34 : 90;
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <ScrollView
+        contentContainerStyle={{ paddingTop: topPad + 16, paddingBottom: bottomPad, paddingHorizontal: 16 }}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <View>
+            <Text style={[styles.screenTitle, { color: colors.foreground }]}>Accounts</Text>
+            <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>
+              {transactions.length} transactions
+            </Text>
+          </View>
+          {transactions.length > 0 && (
+            <TouchableOpacity onPress={clearAll} style={styles.clearBtn}>
+              <Feather name="trash-2" size={16} color={colors.debit} />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <TouchableOpacity
+          style={[styles.uploadBtn, { backgroundColor: colors.primary, opacity: uploading ? 0.7 : 1 }]}
+          onPress={handleUpload}
+          disabled={uploading}
+        >
+          {uploading ? (
+            <ActivityIndicator color={colors.background} />
+          ) : (
+            <>
+              <Feather name="upload" size={18} color={colors.background} />
+              <Text style={[styles.uploadBtnText, { color: colors.background }]}>Upload Statement</Text>
+            </>
+          )}
+        </TouchableOpacity>
+
+        <Text style={[styles.uploadHint, { color: colors.mutedForeground }]}>
+          Supports PDF and CSV bank statements
+        </Text>
+
+        {transactions.length > 0 && (
+          <View style={styles.filterRow}>
+            {(["all", "credit", "debit"] as const).map((f) => (
+              <TouchableOpacity
+                key={f}
+                style={[styles.filterChip, filter === f && { backgroundColor: colors.primary }]}
+                onPress={() => setFilter(f)}
+              >
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    { color: filter === f ? colors.background : colors.mutedForeground },
+                  ]}
+                >
+                  {f === "all" ? "All" : f === "credit" ? "Credits" : "Debits"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        <GlassCard padding={0} style={{ marginBottom: 16 }}>
+          {filtered.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Feather name="file-text" size={28} color={colors.mutedForeground} />
+              <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+                {transactions.length === 0
+                  ? "Upload a PDF or CSV bank statement"
+                  : "No transactions match filter"}
+              </Text>
+            </View>
+          ) : (
+            filtered.map((tx, i) => (
+              <View key={tx.id}>
+                <View style={{ paddingHorizontal: 16 }}>
+                  <TransactionItem tx={tx} />
+                </View>
+                {i < filtered.length - 1 && (
+                  <View style={[styles.divider, { backgroundColor: colors.border }]} />
+                )}
+              </View>
+            ))
+          )}
+        </GlassCard>
+      </ScrollView>
+
+      <Modal visible={previewVisible} animationType="slide" transparent presentationStyle="pageSheet">
+        <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
+          <View style={styles.modalHandle} />
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>
+            Import {previewTxs.length} Transactions
+          </Text>
+          <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+            Review parsed transactions before saving
+          </Text>
+          <FlatList
+            data={previewTxs.slice(0, 50)}
+            keyExtractor={(_, i) => i.toString()}
+            style={{ flex: 1 }}
+            renderItem={({ item, index }) => (
+              <View>
+                <View style={{ paddingHorizontal: 20 }}>
+                  <TransactionItem
+                    tx={{
+                      id: index.toString(),
+                      account_id: null,
+                      description: item.description,
+                      merchant: item.merchant,
+                      amount: item.amount,
+                      type: item.type as "credit" | "debit",
+                      category: item.category,
+                      date: item.date,
+                      source_type: "Statement",
+                      created_at: 0,
+                    }}
+                  />
+                </View>
+                <View style={[styles.divider, { backgroundColor: colors.border }]} />
+              </View>
+            )}
+          />
+          {previewTxs.length > 50 && (
+            <Text style={[styles.moreText, { color: colors.mutedForeground }]}>
+              +{previewTxs.length - 50} more
+            </Text>
+          )}
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 16 }]}>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
+              onPress={() => { setPreviewVisible(false); setPreviewTxs([]); }}
+            >
+              <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.confirmBtn, { backgroundColor: colors.primary }]}
+              onPress={confirmImport}
+            >
+              <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>
+                Save All
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 20,
+  },
+  screenTitle: {
+    fontSize: 28,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+    letterSpacing: -0.5,
+  },
+  screenSub: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
+  },
+  clearBtn: {
+    padding: 8,
+    marginTop: 4,
+  },
+  uploadBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingVertical: 16,
+    borderRadius: 14,
+    marginBottom: 8,
+  },
+  uploadBtnText: {
+    fontSize: 16,
+    fontWeight: "600",
+    fontFamily: "Inter_600SemiBold",
+  },
+  uploadHint: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    textAlign: "center",
+    marginBottom: 20,
+  },
+  filterRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12,
+  },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  filterChipText: {
+    fontSize: 13,
+    fontFamily: "Inter_500Medium",
+  },
+  emptyBox: {
+    padding: 40,
+    alignItems: "center",
+    gap: 10,
+  },
+  emptyText: {
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    textAlign: "center",
+  },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    marginLeft: 68,
+    marginRight: 16,
+  },
+  modal: {
+    flex: 1,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    marginTop: 60,
+    paddingTop: 12,
+  },
+  modalHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.2)",
+    alignSelf: "center",
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+    paddingHorizontal: 20,
+  },
+  modalSub: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    paddingHorizontal: 20,
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  moreText: {
+    textAlign: "center",
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    paddingVertical: 8,
+  },
+  modalActions: {
+    flexDirection: "row",
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+  },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  cancelBtn: {
+    borderWidth: 1,
+  },
+  confirmBtn: {},
+});

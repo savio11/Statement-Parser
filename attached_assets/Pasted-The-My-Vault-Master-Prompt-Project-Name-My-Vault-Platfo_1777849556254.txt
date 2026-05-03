@@ -1,0 +1,38 @@
+The "My Vault" Master Prompt
+Project Name: My Vault
+Platform: Mobile App (React Native + Expo)
+Storage Strategy: Strict Local-First. Use expo-sqlite for all data persistence. No user data, statements, or financial totals should ever leave the device.
+
+Core Concept:
+A secure financial command center where users upload bank and brokerage statements. The app segments data by "Source" to allow for modular updates without losing data from other institutions.
+
+1. Banking & Cashflow Module:
+
+Uploads: Support PDF and CSV parsing for bank/credit card statements.
+
+Logic: Parse transactions and automatically categorize 'Debits' by merchant/seller name.
+
+Visuals: A 'Monthly Cashflow' bar chart comparing total Credit vs. total Debit per month.
+
+2. Investment & Net Worth Module (Segmented Logic):
+
+The 'Broker' Rule: When a user uploads an investment statement, they must select or enter the 'Broker Name' (e.g., Schwab, Trading 212).
+
+Intelligent Update: Before saving new statement data, the app must DELETE only existing records matching that specific 'Broker Name' and 'Source: Statement'. It must NOT touch data from other brokers or manual entries.
+
+Manual Entries: Provide a form for users to manually add stocks/assets (Ticker, Shares, Avg Price, Currency). Flag these as 'Source: Manual' so they are protected from statement-upload deletions.
+
+Multi-Currency: Support investments in different currencies. Allow the user to select a 'Home Currency' (e.g., USD).
+
+Valuation: Integrate a stock price API (e.g., Yahoo Finance) and an Exchange Rate API. On app load, fetch current prices for all stored tickers and convert the total portfolio value into the 'Home Currency'.
+
+3. Security & UI:
+
+Biometrics: Use expo-local-authentication to require FaceID or Fingerprint access to enter the vault.
+
+UI Vibe: Premium "Fintech" aesthetic. Use a dark-mode, glassmorphism theme with 'Bento Box' style cards for metrics.
+
+Navigation: Bottom tab bar for 'Dashboard', 'Accounts/Upload', and 'Investment Portfolio'.
+
+Development Instruction:
+Begin by setting up the SQLite schema to include columns for broker_name, source_type (Statement/Manual), and currency. Then, build the file parsing logic for CSV/PDFs.
