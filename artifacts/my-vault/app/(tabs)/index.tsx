@@ -1,12 +1,16 @@
 import { Feather } from "@expo/vector-icons";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Dimensions,
+  Keyboard,
+  Modal,
   Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
+  TouchableOpacity,
   View,
 } from "react-native";
 import { G, Rect, Text as SvgText, Line, Svg } from "react-native-svg";
@@ -14,10 +18,16 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { GlassCard } from "@/components/GlassCard";
 import { TransactionItem } from "@/components/TransactionItem";
-import { DonutChart, CategoryLegend } from "@/components/DonutChart";
+import { DonutChart, CategoryLegend, CATEGORY_COLORS } from "@/components/DonutChart";
+import { CATEGORY_ICONS, ALL_CATEGORIES } from "@/components/TransactionItem";
+import { BudgetBar } from "@/components/BudgetBar";
 import {
+  getBudgets,
+  setBudget,
+  deleteBudget,
   getCategoryBreakdown,
   getMonthlyCashflow,
+  getThisMonthCategorySpend,
   getTransactions,
   getTotals,
   type CategoryTotal,
@@ -32,15 +42,14 @@ const MONTH_SHORT: Record<string, string> = {
   "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
 };
 
+// ─── Cashflow chart ───────────────────────────────────────────────────────────
+
 function CashflowChart({ data }: { data: MonthlyCashflow[] }) {
   const colors = useColors();
   const screenW = Dimensions.get("window").width;
   const chartW = screenW - 48;
   const chartH = 160;
-  const padL = 44;
-  const padR = 12;
-  const padT = 12;
-  const padB = 28;
+  const padL = 44, padR = 12, padT = 12, padB = 28;
   const innerW = chartW - padL - padR;
   const innerH = chartH - padT - padB;
 
@@ -50,9 +59,7 @@ function CashflowChart({ data }: { data: MonthlyCashflow[] }) {
   if (reversed.length === 0) {
     return (
       <View style={{ height: chartH, alignItems: "center", justifyContent: "center" }}>
-        <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>
-          No data yet
-        </Text>
+        <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>No data yet</Text>
       </View>
     );
   }
@@ -60,69 +67,28 @@ function CashflowChart({ data }: { data: MonthlyCashflow[] }) {
   const groupW = innerW / reversed.length;
   const barW = Math.min(groupW * 0.35, 18);
   const gap = 3;
-
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => ({
-    val: maxVal * t,
-    y: padT + innerH - innerH * t,
-  }));
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => ({ val: maxVal * t, y: padT + innerH - innerH * t }));
 
   return (
     <Svg width={chartW} height={chartH}>
       {yTicks.map((tick, i) => (
         <G key={i}>
-          <Line
-            x1={padL}
-            y1={tick.y}
-            x2={chartW - padR}
-            y2={tick.y}
-            stroke="rgba(255,255,255,0.06)"
-            strokeWidth={1}
-          />
-          <SvgText
-            x={padL - 6}
-            y={tick.y + 4}
-            textAnchor="end"
-            fill="rgba(240,244,255,0.35)"
-            fontSize={9}
-            fontFamily="Inter_400Regular"
-          >
+          <Line x1={padL} y1={tick.y} x2={chartW - padR} y2={tick.y} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+          <SvgText x={padL - 6} y={tick.y + 4} textAnchor="end" fill="rgba(240,244,255,0.35)" fontSize={9} fontFamily="Inter_400Regular">
             {tick.val >= 1000 ? `${(tick.val / 1000).toFixed(0)}k` : tick.val.toFixed(0)}
           </SvgText>
         </G>
       ))}
-
       {reversed.map((item, i) => {
         const x = padL + i * groupW + (groupW - barW * 2 - gap) / 2;
         const creditH = Math.max((item.credits / maxVal) * innerH, 2);
         const debitH = Math.max((item.debits / maxVal) * innerH, 2);
         const label = MONTH_SHORT[item.month.substring(5)] ?? item.month.substring(5);
-
         return (
           <G key={i}>
-            <Rect
-              x={x}
-              y={padT + innerH - creditH}
-              width={barW}
-              height={creditH}
-              fill="#10B981"
-              rx={4}
-            />
-            <Rect
-              x={x + barW + gap}
-              y={padT + innerH - debitH}
-              width={barW}
-              height={debitH}
-              fill="#EF4444"
-              rx={4}
-            />
-            <SvgText
-              x={x + barW}
-              y={chartH - 6}
-              textAnchor="middle"
-              fill="rgba(240,244,255,0.45)"
-              fontSize={9}
-              fontFamily="Inter_400Regular"
-            >
+            <Rect x={x} y={padT + innerH - creditH} width={barW} height={creditH} fill="#10B981" rx={4} />
+            <Rect x={x + barW + gap} y={padT + innerH - debitH} width={barW} height={debitH} fill="#EF4444" rx={4} />
+            <SvgText x={x + barW} y={chartH - 6} textAnchor="middle" fill="rgba(240,244,255,0.45)" fontSize={9} fontFamily="Inter_400Regular">
               {label}
             </SvgText>
           </G>
@@ -132,6 +98,202 @@ function CashflowChart({ data }: { data: MonthlyCashflow[] }) {
   );
 }
 
+// ─── Manage budgets modal ─────────────────────────────────────────────────────
+
+interface ManageBudgetsModalProps {
+  visible: boolean;
+  onClose: () => void;
+  budgets: Record<string, number>;
+  monthSpend: Record<string, number>;
+  onSave: (updated: Record<string, number>) => Promise<void>;
+}
+
+function ManageBudgetsModal({ visible, onClose, budgets, monthSpend, onSave }: ManageBudgetsModalProps) {
+  const colors = useColors();
+  const insets = useSafeAreaInsets();
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      const init: Record<string, string> = {};
+      for (const cat of ALL_CATEGORIES) {
+        init[cat] = budgets[cat] != null ? budgets[cat].toFixed(0) : "";
+      }
+      setDraft(init);
+    }
+  }, [visible, budgets]);
+
+  async function handleSave() {
+    setSaving(true);
+    Keyboard.dismiss();
+    const updated: Record<string, number> = {};
+    for (const cat of ALL_CATEGORIES) {
+      const val = parseFloat(draft[cat] ?? "");
+      if (!isNaN(val) && val > 0) updated[cat] = val;
+    }
+    await onSave(updated);
+    setSaving(false);
+    onClose();
+  }
+
+  const currentMonthName = new Date().toLocaleString("en-GB", { month: "long", year: "numeric" });
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent presentationStyle="pageSheet">
+      <View style={[mStyles.modal, { backgroundColor: "#0D1121" }]}>
+        <View style={mStyles.handle} />
+        <View style={mStyles.titleRow}>
+          <View>
+            <Text style={[mStyles.title, { color: colors.foreground }]}>Monthly Budgets</Text>
+            <Text style={[mStyles.sub, { color: colors.mutedForeground }]}>{currentMonthName}</Text>
+          </View>
+          <TouchableOpacity onPress={onClose} style={mStyles.closeBtn}>
+            <Feather name="x" size={20} color={colors.mutedForeground} />
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 20 }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Text style={[mStyles.hint, { color: colors.mutedForeground }]}>
+            Set a monthly limit per category. Leave blank to remove a budget.
+          </Text>
+
+          {ALL_CATEGORIES.map((cat) => {
+            const color = CATEGORY_COLORS[cat] ?? "#636E72";
+            const spent = monthSpend[cat] ?? 0;
+            const limitVal = parseFloat(draft[cat] ?? "");
+            const hasLimit = !isNaN(limitVal) && limitVal > 0;
+            const pct = hasLimit ? Math.min(spent / limitVal, 1) : null;
+
+            return (
+              <View key={cat} style={[mStyles.catRow, { borderColor: "rgba(255,255,255,0.08)" }]}>
+                <View style={[mStyles.catDot, { backgroundColor: color }]} />
+                <Text style={mStyles.catIcon}>{CATEGORY_ICONS[cat] ?? "•"}</Text>
+                <View style={mStyles.catMiddle}>
+                  <Text style={[mStyles.catName, { color: colors.foreground }]}>{cat}</Text>
+                  {spent > 0 && (
+                    <Text style={[mStyles.catSpent, { color: colors.mutedForeground }]}>
+                      £{spent.toLocaleString("en-GB", { minimumFractionDigits: 0 })} spent this month
+                    </Text>
+                  )}
+                  {pct !== null && (
+                    <View style={[mStyles.miniTrack, { backgroundColor: "rgba(255,255,255,0.07)", marginTop: 4 }]}>
+                      <View
+                        style={[
+                          mStyles.miniFill,
+                          {
+                            width: `${Math.round(pct * 100)}%` as any,
+                            backgroundColor: pct >= 1 ? "#EF4444" : pct >= 0.75 ? "#F59E0B" : "#10B981",
+                          },
+                        ]}
+                      />
+                    </View>
+                  )}
+                </View>
+                <View style={[mStyles.inputWrap, { borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" }]}>
+                  <Text style={[mStyles.pound, { color: colors.mutedForeground }]}>£</Text>
+                  <TextInput
+                    style={[mStyles.input, { color: colors.foreground }]}
+                    value={draft[cat] ?? ""}
+                    onChangeText={(v) => setDraft((d) => ({ ...d, [cat]: v.replace(/[^0-9]/g, "") }))}
+                    keyboardType="number-pad"
+                    placeholder="—"
+                    placeholderTextColor={colors.mutedForeground}
+                    maxLength={6}
+                  />
+                </View>
+              </View>
+            );
+          })}
+        </ScrollView>
+
+        <View style={[mStyles.footer, { paddingBottom: insets.bottom + 16 }]}>
+          <TouchableOpacity
+            style={[mStyles.saveBtn, { backgroundColor: colors.primary, opacity: saving ? 0.7 : 1 }]}
+            onPress={handleSave}
+            disabled={saving}
+          >
+            <Text style={[mStyles.saveTxt, { color: colors.background }]}>
+              {saving ? "Saving…" : "Save Budgets"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const mStyles = StyleSheet.create({
+  modal: {
+    flex: 1,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    marginTop: 60,
+    paddingTop: 12,
+  },
+  handle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.2)",
+    alignSelf: "center", marginBottom: 16,
+  },
+  titleRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    paddingHorizontal: 20,
+    marginBottom: 4,
+  },
+  title: {
+    fontSize: 20, fontWeight: "700", fontFamily: "Inter_700Bold",
+  },
+  sub: {
+    fontSize: 13, fontFamily: "Inter_400Regular", marginTop: 2,
+  },
+  closeBtn: { padding: 4 },
+  hint: {
+    fontSize: 12, fontFamily: "Inter_400Regular",
+    marginBottom: 16, marginTop: 4, lineHeight: 18,
+  },
+  catRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  catDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
+  catIcon: { fontSize: 16, width: 22, textAlign: "center" },
+  catMiddle: { flex: 1 },
+  catName: { fontSize: 13, fontFamily: "Inter_500Medium" },
+  catSpent: { fontSize: 11, fontFamily: "Inter_400Regular", marginTop: 1 },
+  miniTrack: { height: 4, borderRadius: 2, overflow: "hidden" },
+  miniFill: { height: 4, borderRadius: 2 },
+  inputWrap: {
+    flexDirection: "row", alignItems: "center",
+    borderWidth: 1, borderRadius: 8,
+    paddingHorizontal: 8, paddingVertical: 6,
+    minWidth: 72,
+  },
+  pound: { fontSize: 13, fontFamily: "Inter_500Medium", marginRight: 2 },
+  input: { fontSize: 14, fontFamily: "Inter_600SemiBold", minWidth: 40, textAlign: "right" },
+  footer: {
+    paddingHorizontal: 20, paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255,255,255,0.08)",
+  },
+  saveBtn: {
+    paddingVertical: 15, borderRadius: 12,
+    alignItems: "center",
+  },
+  saveTxt: { fontSize: 16, fontFamily: "Inter_600SemiBold" },
+});
+
+// ─── Main screen ──────────────────────────────────────────────────────────────
+
 export default function DashboardScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
@@ -140,23 +302,28 @@ export default function DashboardScreen() {
   const [recent, setRecent] = useState<Transaction[]>([]);
   const [totals, setTotals] = useState({ totalCredits: 0, totalDebits: 0, balance: 0 });
   const [breakdown, setBreakdown] = useState<CategoryTotal[]>([]);
+  const [budgets, setBudgets] = useState<Record<string, number>>({});
+  const [monthSpend, setMonthSpend] = useState<Record<string, number>>({});
+  const [budgetModalVisible, setBudgetModalVisible] = useState(false);
 
   const load = useCallback(async () => {
-    const [cf, tx, tot, bk] = await Promise.all([
+    const [cf, tx, tot, bk, bg, ms] = await Promise.all([
       getMonthlyCashflow(),
       getTransactions(10),
       getTotals(),
       getCategoryBreakdown(),
+      getBudgets(),
+      getThisMonthCategorySpend(),
     ]);
     setCashflow(cf);
     setRecent(tx);
     setTotals(tot);
     setBreakdown(bk);
+    setBudgets(bg);
+    setMonthSpend(ms);
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -164,212 +331,229 @@ export default function DashboardScreen() {
     setRefreshing(false);
   }, [load]);
 
+  async function handleSaveBudgets(updated: Record<string, number>) {
+    const old = budgets;
+    // delete removed budgets
+    for (const cat of ALL_CATEGORIES) {
+      if (old[cat] != null && updated[cat] == null) await deleteBudget(cat);
+    }
+    // upsert new/changed budgets
+    for (const [cat, limit] of Object.entries(updated)) {
+      await setBudget(cat, limit);
+    }
+    await load();
+  }
+
   const formatAmount = (n: number) =>
     n.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const topPad = insets.top + (Platform.OS === "web" ? 67 : 0);
   const bottomPad = Platform.OS === "web" ? 34 : 90;
 
+  const budgetedCategories = ALL_CATEGORIES.filter((c) => budgets[c] != null);
+  const overBudgetCount = budgetedCategories.filter((c) => (monthSpend[c] ?? 0) > budgets[c]).length;
+
+  const currentMonth = new Date().toLocaleString("en-GB", { month: "long", year: "numeric" });
+
   return (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: colors.background }}
-      contentContainerStyle={{ paddingTop: topPad + 16, paddingBottom: bottomPad, paddingHorizontal: 16 }}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
-    >
-      <Text style={[styles.screenTitle, { color: colors.foreground }]}>My Vault</Text>
-      <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>Financial overview</Text>
+    <>
+      <ScrollView
+        style={{ flex: 1, backgroundColor: colors.background }}
+        contentContainerStyle={{ paddingTop: topPad + 16, paddingBottom: bottomPad, paddingHorizontal: 16 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
+      >
+        <Text style={[styles.screenTitle, { color: colors.foreground }]}>My Vault</Text>
+        <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>Financial overview</Text>
 
-      <View style={styles.statRow}>
-        <GlassCard style={[styles.statCard, styles.statCardWide]}>
-          <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Net Balance</Text>
-          <Text style={[styles.statValue, { color: colors.primary, fontSize: 26 }]}>
-            £{formatAmount(Math.abs(totals.balance))}
-          </Text>
-        </GlassCard>
-      </View>
-
-      <View style={styles.statRow}>
-        <GlassCard style={styles.statCard}>
-          <View style={styles.statHeaderRow}>
-            <Feather name="arrow-down-circle" size={14} color={colors.credit} />
-            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Income</Text>
-          </View>
-          <Text style={[styles.statValue, { color: colors.credit }]}>
-            £{formatAmount(totals.totalCredits)}
-          </Text>
-        </GlassCard>
-        <GlassCard style={styles.statCard}>
-          <View style={styles.statHeaderRow}>
-            <Feather name="arrow-up-circle" size={14} color={colors.debit} />
-            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Spent</Text>
-          </View>
-          <Text style={[styles.statValue, { color: colors.debit }]}>
-            £{formatAmount(totals.totalDebits)}
-          </Text>
-        </GlassCard>
-      </View>
-
-      <GlassCard style={styles.chartCard} padding={16}>
-        <View style={styles.chartHeader}>
-          <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Monthly Cashflow</Text>
-          <View style={styles.legendRow}>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: "#10B981" }]} />
-              <Text style={[styles.legendText, { color: colors.mutedForeground }]}>In</Text>
-            </View>
-            <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: "#EF4444" }]} />
-              <Text style={[styles.legendText, { color: colors.mutedForeground }]}>Out</Text>
-            </View>
-          </View>
-        </View>
-        <CashflowChart data={cashflow} />
-      </GlassCard>
-
-      <GlassCard style={styles.chartCard} padding={16}>
-        <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Spending Breakdown</Text>
-        {breakdown.length === 0 ? (
-          <View style={styles.emptyBox}>
-            <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>No spending data yet</Text>
-          </View>
-        ) : (
-          <View style={styles.breakdownRow}>
-            <DonutChart data={breakdown} size={148} />
-            <CategoryLegend data={breakdown} limit={6} />
-          </View>
-        )}
-      </GlassCard>
-
-      <GlassCard style={styles.txCard} padding={0}>
-        <View style={styles.txHeader}>
-          <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Recent Transactions</Text>
-        </View>
-        {recent.length === 0 ? (
-          <View style={styles.emptyBox}>
-            <Feather name="inbox" size={28} color={colors.mutedForeground} />
-            <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-              Upload a statement to get started
+        {/* Balance cards */}
+        <View style={styles.statRow}>
+          <GlassCard style={[styles.statCard, styles.statCardWide]}>
+            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Net Balance</Text>
+            <Text style={[styles.statValue, { color: colors.primary, fontSize: 26 }]}>
+              £{formatAmount(Math.abs(totals.balance))}
             </Text>
-          </View>
-        ) : (
-          recent.map((tx, i) => (
-            <View key={tx.id}>
-              <View style={{ paddingHorizontal: 16 }}>
-                <TransactionItem tx={tx} />
+          </GlassCard>
+        </View>
+
+        <View style={styles.statRow}>
+          <GlassCard style={styles.statCard}>
+            <View style={styles.statHeaderRow}>
+              <Feather name="arrow-down-circle" size={14} color={colors.credit} />
+              <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Income</Text>
+            </View>
+            <Text style={[styles.statValue, { color: colors.credit }]}>£{formatAmount(totals.totalCredits)}</Text>
+          </GlassCard>
+          <GlassCard style={styles.statCard}>
+            <View style={styles.statHeaderRow}>
+              <Feather name="arrow-up-circle" size={14} color={colors.debit} />
+              <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Spent</Text>
+            </View>
+            <Text style={[styles.statValue, { color: colors.debit }]}>£{formatAmount(totals.totalDebits)}</Text>
+          </GlassCard>
+        </View>
+
+        {/* Cashflow chart */}
+        <GlassCard style={styles.chartCard} padding={16}>
+          <View style={styles.chartHeader}>
+            <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Monthly Cashflow</Text>
+            <View style={styles.legendRow}>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: "#10B981" }]} />
+                <Text style={[styles.legendText, { color: colors.mutedForeground }]}>In</Text>
               </View>
-              {i < recent.length - 1 && (
-                <View style={[styles.divider, { backgroundColor: colors.border }]} />
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: "#EF4444" }]} />
+                <Text style={[styles.legendText, { color: colors.mutedForeground }]}>Out</Text>
+              </View>
+            </View>
+          </View>
+          <CashflowChart data={cashflow} />
+        </GlassCard>
+
+        {/* Spending breakdown donut */}
+        <GlassCard style={styles.chartCard} padding={16}>
+          <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Spending Breakdown</Text>
+          {breakdown.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>No spending data yet</Text>
+            </View>
+          ) : (
+            <View style={styles.breakdownRow}>
+              <DonutChart data={breakdown} size={148} />
+              <CategoryLegend data={breakdown} limit={6} />
+            </View>
+          )}
+        </GlassCard>
+
+        {/* Monthly budgets */}
+        <GlassCard style={styles.chartCard} padding={16}>
+          <View style={styles.chartHeader}>
+            <View>
+              <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Monthly Budgets</Text>
+              {overBudgetCount > 0 && (
+                <View style={styles.alertBadge}>
+                  <Feather name="alert-circle" size={11} color="#EF4444" />
+                  <Text style={styles.alertText}>{overBudgetCount} over limit</Text>
+                </View>
               )}
             </View>
-          ))
-        )}
-      </GlassCard>
-    </ScrollView>
+            <TouchableOpacity
+              style={[styles.manageBtn, { borderColor: colors.border }]}
+              onPress={() => setBudgetModalVisible(true)}
+            >
+              <Feather name="sliders" size={13} color={colors.primary} />
+              <Text style={[styles.manageTxt, { color: colors.primary }]}>Manage</Text>
+            </TouchableOpacity>
+          </View>
+
+          {budgetedCategories.length === 0 ? (
+            <TouchableOpacity style={styles.emptyBudgetBtn} onPress={() => setBudgetModalVisible(true)}>
+              <Feather name="plus-circle" size={18} color={colors.primary} />
+              <Text style={[styles.emptyBudgetText, { color: colors.primary }]}>
+                Set up your first budget
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            budgetedCategories.map((cat) => (
+              <BudgetBar
+                key={cat}
+                category={cat}
+                spent={monthSpend[cat] ?? 0}
+                limit={budgets[cat]}
+              />
+            ))
+          )}
+
+          {budgetedCategories.length > 0 && (
+            <Text style={[styles.monthNote, { color: colors.mutedForeground }]}>
+              {currentMonth}
+            </Text>
+          )}
+        </GlassCard>
+
+        {/* Recent transactions */}
+        <GlassCard style={styles.txCard} padding={0}>
+          <View style={styles.txHeader}>
+            <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Recent Transactions</Text>
+          </View>
+          {recent.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Feather name="inbox" size={28} color={colors.mutedForeground} />
+              <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+                Upload a statement to get started
+              </Text>
+            </View>
+          ) : (
+            recent.map((tx, i) => (
+              <View key={tx.id}>
+                <View style={{ paddingHorizontal: 16 }}>
+                  <TransactionItem tx={tx} />
+                </View>
+                {i < recent.length - 1 && (
+                  <View style={[styles.divider, { backgroundColor: colors.border }]} />
+                )}
+              </View>
+            ))
+          )}
+        </GlassCard>
+      </ScrollView>
+
+      <ManageBudgetsModal
+        visible={budgetModalVisible}
+        onClose={() => setBudgetModalVisible(false)}
+        budgets={budgets}
+        monthSpend={monthSpend}
+        onSave={handleSaveBudgets}
+      />
+    </>
   );
 }
 
 const styles = StyleSheet.create({
   screenTitle: {
-    fontSize: 28,
-    fontWeight: "700",
-    fontFamily: "Inter_700Bold",
-    letterSpacing: -0.5,
+    fontSize: 28, fontWeight: "700", fontFamily: "Inter_700Bold", letterSpacing: -0.5,
   },
   screenSub: {
-    fontSize: 13,
-    fontFamily: "Inter_400Regular",
-    marginTop: 2,
-    marginBottom: 20,
+    fontSize: 13, fontFamily: "Inter_400Regular", marginTop: 2, marginBottom: 20,
   },
-  statRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginBottom: 10,
-  },
-  statCard: {
-    flex: 1,
-    padding: 16,
-  },
-  statCardWide: {
-    flex: 1,
-  },
-  statHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    marginBottom: 4,
-  },
-  statLabel: {
-    fontSize: 12,
-    fontFamily: "Inter_400Regular",
-    marginBottom: 4,
-  },
-  statValue: {
-    fontSize: 20,
-    fontWeight: "700",
-    fontFamily: "Inter_700Bold",
-    letterSpacing: -0.3,
-  },
-  chartCard: {
-    marginTop: 6,
-    marginBottom: 10,
-  },
+  statRow: { flexDirection: "row", gap: 10, marginBottom: 10 },
+  statCard: { flex: 1, padding: 16 },
+  statCardWide: { flex: 1 },
+  statHeaderRow: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 4 },
+  statLabel: { fontSize: 12, fontFamily: "Inter_400Regular", marginBottom: 4 },
+  statValue: { fontSize: 20, fontWeight: "700", fontFamily: "Inter_700Bold", letterSpacing: -0.3 },
+  chartCard: { marginTop: 6, marginBottom: 10 },
   chartHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 12,
+    flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12,
   },
-  legendRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  legendItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  legendDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  legendText: {
-    fontSize: 11,
-    fontFamily: "Inter_400Regular",
-  },
+  legendRow: { flexDirection: "row", gap: 12 },
+  legendItem: { flexDirection: "row", alignItems: "center", gap: 4 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontSize: 11, fontFamily: "Inter_400Regular" },
   sectionTitle: {
-    fontSize: 15,
-    fontWeight: "600",
-    fontFamily: "Inter_600SemiBold",
-    marginBottom: 12,
+    fontSize: 15, fontWeight: "600", fontFamily: "Inter_600SemiBold", marginBottom: 4,
   },
-  breakdownRow: {
-    flexDirection: "row",
-    alignItems: "center",
+  alertBadge: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 8 },
+  alertText: { fontSize: 11, fontFamily: "Inter_400Regular", color: "#EF4444" },
+  manageBtn: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    borderWidth: 1, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 5,
   },
-  txCard: {
-    marginBottom: 10,
-    paddingHorizontal: 0,
+  manageTxt: { fontSize: 12, fontFamily: "Inter_500Medium" },
+  emptyBudgetBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 8, paddingVertical: 20,
   },
-  txHeader: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
+  emptyBudgetText: { fontSize: 14, fontFamily: "Inter_500Medium" },
+  monthNote: {
+    fontSize: 11, fontFamily: "Inter_400Regular",
+    textAlign: "right", marginTop: 4,
   },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    marginLeft: 68,
-    marginRight: 16,
-  },
-  emptyBox: {
-    paddingVertical: 24,
-    alignItems: "center",
-    gap: 10,
-  },
-  emptyText: {
-    fontSize: 14,
-    fontFamily: "Inter_400Regular",
-    textAlign: "center",
-  },
+  breakdownRow: { flexDirection: "row", alignItems: "center" },
+  txCard: { marginBottom: 10, paddingHorizontal: 0 },
+  txHeader: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
+  divider: { height: StyleSheet.hairlineWidth, marginLeft: 68, marginRight: 16 },
+  emptyBox: { paddingVertical: 24, alignItems: "center", gap: 10 },
+  emptyText: { fontSize: 14, fontFamily: "Inter_400Regular", textAlign: "center" },
 });

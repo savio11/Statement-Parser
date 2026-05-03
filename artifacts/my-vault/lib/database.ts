@@ -331,3 +331,75 @@ export async function updateTransactionCategory(id: string, category: string): P
   const db = await getNativeDb();
   await db.runAsync("UPDATE transactions SET category = ? WHERE id = ?", [category, id]);
 }
+
+// ─── Budgets (stored as settings budget_<category>) ──────────────────────────
+
+export async function getBudgets(): Promise<Record<string, number>> {
+  const prefix = "budget_";
+  const result: Record<string, number> = {};
+  if (Platform.OS === "web") {
+    const keys = await AsyncStorage.getAllKeys();
+    for (const k of keys) {
+      if (k.startsWith(`${AS_SETTINGS_KEY}_${prefix}`)) {
+        const cat = k.slice(`${AS_SETTINGS_KEY}_${prefix}`.length);
+        const val = await AsyncStorage.getItem(k);
+        if (val) result[cat] = parseFloat(val);
+      }
+    }
+    return result;
+  }
+  const db = await getNativeDb();
+  const rows = await db.getAllAsync<{ key: string; value: string }>(
+    "SELECT key, value FROM settings WHERE key LIKE 'budget_%'"
+  );
+  for (const row of rows) {
+    const cat = row.key.slice(prefix.length);
+    result[cat] = parseFloat(row.value);
+  }
+  return result;
+}
+
+export async function setBudget(category: string, limit: number): Promise<void> {
+  await setSetting(`budget_${category}`, limit.toFixed(2));
+}
+
+export async function deleteBudget(category: string): Promise<void> {
+  if (Platform.OS === "web") {
+    await AsyncStorage.removeItem(`${AS_SETTINGS_KEY}_budget_${category}`);
+    return;
+  }
+  const db = await getNativeDb();
+  await db.runAsync("DELETE FROM settings WHERE key = ?", [`budget_${category}`]);
+}
+
+export interface MonthSpend {
+  category: string;
+  spent: number;
+}
+
+export async function getThisMonthCategorySpend(): Promise<Record<string, number>> {
+  const month = new Date().toISOString().substring(0, 7); // e.g. "2026-05"
+  const result: Record<string, number> = {};
+
+  if (Platform.OS === "web") {
+    const all = await asGetAll<Transaction>(AS_TX_KEY);
+    for (const tx of all) {
+      if (tx.type !== "debit") continue;
+      if (!tx.date.startsWith(month)) continue;
+      result[tx.category] = (result[tx.category] ?? 0) + tx.amount;
+    }
+    return result;
+  }
+  const db = await getNativeDb();
+  const rows = await db.getAllAsync<{ category: string; spent: number }>(
+    `SELECT category, ROUND(SUM(amount), 2) as spent
+     FROM transactions
+     WHERE type = 'debit' AND strftime('%Y-%m', date) = ?
+     GROUP BY category`,
+    [month]
+  );
+  for (const row of rows) {
+    result[row.category] = row.spent;
+  }
+  return result;
+}
