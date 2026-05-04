@@ -1,6 +1,6 @@
 import { Feather } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system";
+import { readFileAsBase64, readFileAsText } from "@/lib/fileReader";
 import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -236,18 +236,18 @@ export default function AccountsScreen() {
 
       const asset = result.assets[0];
       setUploading(true);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
       const ext = asset.name.toLowerCase().split(".").pop();
 
       if (ext === "csv") {
-        const text = await FileSystem.readAsStringAsync(asset.uri, { encoding: "utf8" as any });
+        const text = await readFileAsText(asset.uri);
         const parsed = parseCSV(text);
         setPreviewTxs(parsed);
         setPreviewVisible(true);
       } else if (ext === "pdf") {
         const domain = process.env.EXPO_PUBLIC_DOMAIN;
-        const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: "base64" as any });
+        const base64 = await readFileAsBase64(asset.uri);
         const response = await fetch(`https://${domain}/api/parse-pdf`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },

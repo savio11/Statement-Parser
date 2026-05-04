@@ -1,6 +1,6 @@
 import { Feather } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system";
+import { readFileAsBase64 } from "@/lib/fileReader";
 import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -347,7 +347,7 @@ export default function PortfolioScreen() {
       setImportUploading(true);
       if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-      const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: "base64" as any });
+      const base64 = await readFileAsBase64(asset.uri);
       const response = await fetch(`${BASE}/api/parse-holdings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
