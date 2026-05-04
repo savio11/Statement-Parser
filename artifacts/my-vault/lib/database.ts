@@ -207,14 +207,13 @@ export async function getMonthlyCashflow(): Promise<MonthlyCashflow[]> {
     }
     return Object.entries(byMonth)
       .sort(([a], [b]) => b.localeCompare(a))
-      .slice(0, 6)
       .map(([month, v]) => ({ month, credits: +v.credits.toFixed(2), debits: +v.debits.toFixed(2) }));
   }
   return db.getAllAsync<MonthlyCashflow>(
     `SELECT strftime('%Y-%m', date) as month,
       ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE 0 END),2) as credits,
       ROUND(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END),2) as debits
-    FROM transactions GROUP BY month ORDER BY month DESC LIMIT 6`
+    FROM transactions GROUP BY month ORDER BY month DESC`
   );
 }
 

@@ -1,5 +1,5 @@
 import { Feather } from "@expo/vector-icons";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFocusEffect } from "expo-router";
 import {
   Dimensions,
@@ -311,6 +311,8 @@ export default function DashboardScreen() {
   const [budgetModalVisible, setBudgetModalVisible] = useState(false);
   const [subscriptions, setSubscriptions] = useState<DetectedSubscription[]>([]);
   const [portfolioValue, setPortfolioValue] = useState(0);
+  const [cfYear, setCfYear] = useState<string>("all");
+  const [cfQuarter, setCfQuarter] = useState<string>("all");
 
   const load = useCallback(async () => {
     const [cf, allTx, tot, bk, bg, ms, pv] = await Promise.all([
@@ -365,6 +367,28 @@ export default function DashboardScreen() {
   const currentMonth = new Date().toLocaleString("en-GB", { month: "long", year: "numeric" });
 
   const totalMonthlySubCost = subscriptions.reduce((s, sub) => s + sub.monthlyEquiv, 0);
+
+  const cfYears = useMemo(() => {
+    const years = [...new Set(cashflow.map((d) => d.month.substring(0, 4)))].sort((a, b) => b.localeCompare(a));
+    return years;
+  }, [cashflow]);
+
+  const QUARTER_MONTHS: Record<string, string[]> = {
+    Q1: ["01", "02", "03"],
+    Q2: ["04", "05", "06"],
+    Q3: ["07", "08", "09"],
+    Q4: ["10", "11", "12"],
+  };
+
+  const filteredCashflow = useMemo(() => {
+    let data = cashflow;
+    if (cfYear !== "all") data = data.filter((d) => d.month.startsWith(cfYear));
+    if (cfQuarter !== "all") {
+      const months = QUARTER_MONTHS[cfQuarter] ?? [];
+      data = data.filter((d) => months.includes(d.month.substring(5)));
+    }
+    return data;
+  }, [cashflow, cfYear, cfQuarter]);
 
   return (
     <>
@@ -428,7 +452,52 @@ export default function DashboardScreen() {
               </View>
             </View>
           </View>
-          <CashflowChart data={cashflow} />
+
+          {cfYears.length > 0 && (
+            <>
+              {/* Year selector */}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                {(["all", ...cfYears] as string[]).map((y) => (
+                  <TouchableOpacity
+                    key={y}
+                    onPress={() => { setCfYear(y); setCfQuarter("all"); }}
+                    style={[
+                      styles.cfChip,
+                      { borderColor: cfYear === y ? colors.primary : colors.border },
+                      cfYear === y && { backgroundColor: colors.primary },
+                    ]}
+                  >
+                    <Text style={[styles.cfChipText, { color: cfYear === y ? colors.background : colors.mutedForeground }]}>
+                      {y === "all" ? "All" : y}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              {/* Quarter selector — only shown when a specific year is selected */}
+              {cfYear !== "all" && (
+                <View style={styles.cfQuarterRow}>
+                  {(["all", "Q1", "Q2", "Q3", "Q4"] as string[]).map((q) => (
+                    <TouchableOpacity
+                      key={q}
+                      onPress={() => setCfQuarter(q)}
+                      style={[
+                        styles.cfChip,
+                        { borderColor: cfQuarter === q ? colors.primary : colors.border },
+                        cfQuarter === q && { backgroundColor: colors.primary },
+                      ]}
+                    >
+                      <Text style={[styles.cfChipText, { color: cfQuarter === q ? colors.background : colors.mutedForeground }]}>
+                        {q === "all" ? "All" : q}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </>
+          )}
+
+          <CashflowChart data={filteredCashflow} />
         </GlassCard>
 
         {/* Spending breakdown donut */}
@@ -617,4 +686,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6,
   },
   subBadgeText: { fontSize: 11, fontFamily: "Inter_500Medium", color: "#E17055" },
+  cfChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 20,
+    borderWidth: 1,
+    marginRight: 6,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  cfChipText: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+  },
+  cfQuarterRow: {
+    flexDirection: "row",
+    marginBottom: 8,
+  },
 });
