@@ -2,7 +2,7 @@ import { Feather } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import { readFileAsBase64, readFileAsText } from "@/lib/fileReader";
 import * as Haptics from "expo-haptics";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -173,6 +173,8 @@ export default function AccountsScreen() {
   const [totals, setTotals] = useState({ totalCredits: 0, totalDebits: 0, balance: 0 });
   const [filter, setFilter] = useState<"all" | "credit" | "debit">("all");
 
+  const currentMonth = new Date().toISOString().substring(0, 7);
+  const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set([currentMonth]));
   const [recatTx, setRecatTx] = useState<Transaction | null>(null);
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderDay, setReminderDay] = useState(1);
@@ -323,6 +325,33 @@ export default function AccountsScreen() {
 
   const filtered = filter === "all" ? transactions : transactions.filter((t) => t.type === filter);
 
+  const monthGroups = useMemo(() => {
+    const byMonth: Record<string, Transaction[]> = {};
+    for (const tx of filtered) {
+      const m = tx.date.substring(0, 7);
+      if (!byMonth[m]) byMonth[m] = [];
+      byMonth[m].push(tx);
+    }
+    return Object.entries(byMonth)
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([month, txs]) => {
+        const [y, mo] = month.split("-");
+        const label = new Date(parseInt(y), parseInt(mo) - 1, 1)
+          .toLocaleString("en-GB", { month: "long", year: "numeric" });
+        const credits = txs.filter(t => t.type === "credit").reduce((s, t) => s + t.amount, 0);
+        const debits  = txs.filter(t => t.type === "debit").reduce((s, t) => s + t.amount, 0);
+        return { month, label, txs, credits, debits };
+      });
+  }, [filtered]);
+
+  function toggleMonth(month: string) {
+    setExpandedMonths(prev => {
+      const next = new Set(prev);
+      if (next.has(month)) next.delete(month); else next.add(month);
+      return next;
+    });
+  }
+
   const topPad = insets.top + (Platform.OS === "web" ? 67 : 0);
   const bottomPad = Platform.OS === "web" ? 34 : 90;
 
@@ -386,8 +415,8 @@ export default function AccountsScreen() {
           </View>
         )}
 
-        <GlassCard padding={0} style={{ marginBottom: 16 }}>
-          {filtered.length === 0 ? (
+        {filtered.length === 0 ? (
+          <GlassCard padding={0} style={{ marginBottom: 16 }}>
             <View style={styles.emptyBox}>
               <Feather name="file-text" size={28} color={colors.mutedForeground} />
               <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
@@ -396,19 +425,57 @@ export default function AccountsScreen() {
                   : "No transactions match filter"}
               </Text>
             </View>
-          ) : (
-            filtered.map((tx, i) => (
-              <View key={tx.id}>
-                <View style={{ paddingHorizontal: 16 }}>
-                  <TransactionItem tx={tx} onPress={setRecatTx} />
-                </View>
-                {i < filtered.length - 1 && (
-                  <View style={[styles.divider, { backgroundColor: colors.border }]} />
+          </GlassCard>
+        ) : (
+          monthGroups.map(({ month, label, txs, credits, debits }) => {
+            const expanded = expandedMonths.has(month);
+            return (
+              <GlassCard key={month} padding={0} style={{ marginBottom: 10 }}>
+                <TouchableOpacity
+                  style={styles.monthHeader}
+                  onPress={() => toggleMonth(month)}
+                  activeOpacity={0.7}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.monthLabel, { color: colors.foreground }]}>{label}</Text>
+                    <View style={styles.monthMeta}>
+                      <Text style={[styles.monthMetaText, { color: colors.credit }]}>
+                        +£{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                      </Text>
+                      <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}> · </Text>
+                      <Text style={[styles.monthMetaText, { color: colors.debit }]}>
+                        -£{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                      </Text>
+                      <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}>
+                        {" · "}{txs.length} transaction{txs.length !== 1 ? "s" : ""}
+                      </Text>
+                    </View>
+                  </View>
+                  <Feather
+                    name={expanded ? "chevron-up" : "chevron-down"}
+                    size={18}
+                    color={colors.mutedForeground}
+                  />
+                </TouchableOpacity>
+                {expanded && (
+                  <>
+                    <View style={[styles.divider, { backgroundColor: colors.border, marginLeft: 0, marginRight: 0 }]} />
+                    {txs.map((tx, i) => (
+                      <View key={tx.id}>
+                        <View style={{ paddingHorizontal: 16 }}>
+                          <TransactionItem tx={tx} onPress={setRecatTx} />
+                        </View>
+                        {i < txs.length - 1 && (
+                          <View style={[styles.divider, { backgroundColor: colors.border }]} />
+                        )}
+                      </View>
+                    ))}
+                  </>
                 )}
-              </View>
-            ))
-          )}
-        </GlassCard>
+              </GlassCard>
+            );
+          })
+        )}
 
         {/* ── Monthly reminder card ── */}
         <GlassCard padding={16} style={{ marginBottom: 16 }}>
@@ -657,6 +724,27 @@ const styles = StyleSheet.create({
   filterChipText: {
     fontSize: 13,
     fontFamily: "Inter_500Medium",
+  },
+  monthHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  monthLabel: {
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+    marginBottom: 2,
+  },
+  monthMeta: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+  },
+  monthMetaText: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
   },
   emptyBox: {
     padding: 40,

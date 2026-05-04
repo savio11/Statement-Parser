@@ -315,19 +315,10 @@ export default function PortfolioScreen() {
   }
 
   async function removeHolding(id: string) {
-    Alert.alert("Remove holding", "Delete this investment?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          await deleteInvestment(id);
-          setEditingHolding(null);
-          if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-          await loadAndPrice();
-        },
-      },
-    ]);
+    await deleteInvestment(id);
+    setEditingHolding(null);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    await loadAndPrice();
   }
 
   async function changeHomeCurrency(c: string) {
