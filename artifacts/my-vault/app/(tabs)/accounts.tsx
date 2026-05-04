@@ -23,6 +23,7 @@ import { CATEGORY_COLORS } from "@/components/DonutChart";
 import {
   categorize,
   deleteAllTransactions,
+  deleteTransaction,
   deleteTransactionsByMonth,
   getTransactions,
   getTotals,
@@ -326,6 +327,29 @@ export default function AccountsScreen() {
     await load();
   }
 
+  async function handleDeleteTx() {
+    if (!recatTx) return;
+    const tx = recatTx;
+    setRecatTx(null);
+    if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    Alert.alert(
+      "Delete transaction?",
+      `"${tx.merchant || tx.description}" (${tx.type === "credit" ? "+" : "-"}${tx.amount.toFixed(2)}) will be permanently removed.`,
+      [
+        { text: "Cancel", style: "cancel", onPress: () => setRecatTx(tx) },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteTransaction(tx.id);
+            if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+            await load();
+          },
+        },
+      ]
+    );
+  }
+
   const filtered = filter === "all" ? transactions : transactions.filter((t) => t.type === filter);
 
   const monthGroups = useMemo(() => {
@@ -414,7 +438,7 @@ export default function AccountsScreen() {
         </TouchableOpacity>
 
         <Text style={[styles.uploadHint, { color: colors.mutedForeground }]}>
-          Tap any transaction to change its category
+          Tap any transaction to change its category or delete it
         </Text>
 
         {transactions.length > 0 && (
@@ -664,15 +688,28 @@ export default function AccountsScreen() {
         </View>
       </Modal>
 
-      {/* ── Re-categorize modal ── */}
+      {/* ── Re-categorize / delete modal ── */}
       <Modal visible={!!recatTx} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
-          <Text style={[styles.modalTitle, { color: colors.foreground }]}>Change Category</Text>
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>Transaction</Text>
           {recatTx && (
-            <Text style={[styles.modalSub, { color: colors.mutedForeground }]} numberOfLines={1}>
-              {recatTx.merchant || recatTx.description}
-            </Text>
+            <View style={{ paddingHorizontal: 20, marginBottom: 4 }}>
+              <Text style={[styles.modalSub, { color: colors.mutedForeground }]} numberOfLines={1}>
+                {recatTx.merchant || recatTx.description}
+              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 }}>
+                <Text style={[{ fontFamily: "Inter_600SemiBold", fontSize: 15, color: recatTx.type === "credit" ? colors.credit : colors.debit }]}>
+                  {recatTx.type === "credit" ? "+" : "-"}{recatTx.amount.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </Text>
+                <Text style={[{ fontFamily: "Inter_400Regular", fontSize: 12, color: colors.mutedForeground }]}>
+                  · {recatTx.date}
+                </Text>
+              </View>
+              <Text style={[{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.mutedForeground, marginTop: 10 }]}>
+                SELECT CATEGORY
+              </Text>
+            </View>
           )}
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 8, paddingBottom: 20 }}>
             {ALL_CATEGORIES.map((cat) => {
@@ -703,9 +740,17 @@ export default function AccountsScreen() {
               );
             })}
           </ScrollView>
-          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 16 }]}>
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 16, gap: 10 }]}>
             <TouchableOpacity
-              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
+              style={[styles.modalBtn, { backgroundColor: "rgba(239,68,68,0.12)", borderWidth: 1, borderColor: "rgba(239,68,68,0.3)", flex: 1 }]}
+              onPress={handleDeleteTx}
+              activeOpacity={0.8}
+            >
+              <Feather name="trash-2" size={15} color={colors.debit} />
+              <Text style={{ color: colors.debit, fontFamily: "Inter_600SemiBold", marginLeft: 6 }}>Delete</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border, flex: 1 }]}
               onPress={() => setRecatTx(null)}
             >
               <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>

@@ -242,6 +242,16 @@ export async function getTransactions(limit = 200): Promise<Transaction[]> {
   );
 }
 
+export async function deleteTransaction(id: string): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    const all = await asGetAll<Transaction>(AS_TX_KEY);
+    await asSetAll(AS_TX_KEY, all.filter((t) => t.id !== id));
+    return;
+  }
+  await db.runAsync("DELETE FROM transactions WHERE id = ?", [id]);
+}
+
 export async function deleteTransactionsByMonth(month: string): Promise<void> {
   const db = await getDb();
   if (!db) {
