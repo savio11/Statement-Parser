@@ -23,6 +23,7 @@ import { CATEGORY_COLORS } from "@/components/DonutChart";
 import {
   categorize,
   deleteAllTransactions,
+  deleteTransactionsByMonth,
   getTransactions,
   getTotals,
   insertTransactions,
@@ -352,6 +353,26 @@ export default function AccountsScreen() {
     });
   }
 
+  function deleteMonth(month: string, label: string, count: number) {
+    if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    Alert.alert(
+      `Delete ${label}?`,
+      `This will permanently delete all ${count} transaction${count !== 1 ? "s" : ""} from ${label}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteTransactionsByMonth(month);
+            if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+            await load();
+          },
+        },
+      ]
+    );
+  }
+
   const topPad = insets.top + (Platform.OS === "web" ? 67 : 0);
   const bottomPad = Platform.OS === "web" ? 34 : 90;
 
@@ -434,6 +455,8 @@ export default function AccountsScreen() {
                 <TouchableOpacity
                   style={styles.monthHeader}
                   onPress={() => toggleMonth(month)}
+                  onLongPress={() => deleteMonth(month, label, txs.length)}
+                  delayLongPress={500}
                   activeOpacity={0.7}
                 >
                   <View style={{ flex: 1 }}>
