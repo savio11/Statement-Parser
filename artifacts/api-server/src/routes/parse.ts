@@ -516,6 +516,115 @@ function parseBankPDF(text: string): { transactions: ParsedTransaction[]; strate
   return { transactions, strategy };
 }
 
+// ─── Holdings PDF parser ──────────────────────────────────────────────────────
+//
+// Parses "Confirmation of Holdings" style PDFs from any broker that lists:
+//   INSTRUMENT  |  ISIN  |  QUANTITY  |  PRICE
+// Detected brokers: Trading 212, Hargreaves Lansdown, Interactive Investor,
+// Freetrade, Vanguard, AJ Bell, Stake, etc.
+//
+// ISIN (12 chars, [A-Z]{2}[A-Z0-9]{9}[0-9]) is the anchor: everything before it
+// on the same line is the company name, and the quantity + currency + price follow.
+// GBX (pence) amounts are automatically converted to GBP (÷ 100).
+
+interface ParsedHolding {
+  name: string;
+  isin: string;
+  quantity: number;
+  price: number;
+  currency: string;
+  ticker: string;
+  tickerResolved: boolean;
+}
+
+function parseHoldingsPDF(text: string): {
+  holdings: Array<Omit<ParsedHolding, "ticker" | "tickerResolved">>;
+  platform: string;
+  account: string;
+  asOf: string;
+} {
+  const platform =
+    /trading 212/i.test(text) ? "Trading 212" :
+    /hargreaves lansdown/i.test(text) ? "Hargreaves Lansdown" :
+    /interactive investor/i.test(text) ? "Interactive Investor" :
+    /freetrade/i.test(text) ? "Freetrade" :
+    /aj bell/i.test(text) ? "AJ Bell" :
+    /stake/i.test(text) ? "Stake" :
+    /vanguard/i.test(text) ? "Vanguard" : "Broker";
+
+  const asOfM = text.match(/as of\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{4})/i);
+  const asOf = asOfM ? asOfM[1] : "";
+
+  // Account type line e.g. "Trading 212 Stocks ISA"
+  const acctM = text.match(new RegExp(`${platform}[^\\n]*`, "i"));
+  const account = acctM ? acctM[0].trim() : platform;
+
+  const ISIN_RE = /\b([A-Z]{2}[A-Z0-9]{9}[0-9])\b/;
+  const boilerplateRe = /^(INSTRUMENT|ISIN|QUANTITY|PRICE|This document|Prices are|The information|Registered|authorised|Trading 212 is a|Trading 212 UK|Holdings value|Confirmation of|as of |\d\/\d|Page \d)/i;
+
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const holdings: Array<Omit<ParsedHolding, "ticker" | "tickerResolved">> = [];
+  let prevLine = "";
+
+  for (const line of lines) {
+    const isinM = line.match(ISIN_RE);
+    if (!isinM) {
+      if (!boilerplateRe.test(line)) prevLine = line;
+      continue;
+    }
+
+    const isin = isinM[1];
+    const isinIdx = isinM.index!;
+
+    // Company name: text before ISIN on this line (or previous non-boilerplate line)
+    let name = line.substring(0, isinIdx).trim();
+    if (!name) name = prevLine;
+    // Strip leading punctuation / boilerplate residue
+    name = name.replace(/^[\s\-–|,;.]+/, "").trim();
+    if (!name || name.length < 2) { prevLine = ""; continue; }
+
+    // After ISIN: "QUANTITY  CURRENCY  PRICE"
+    const afterIsin = line.substring(isinIdx + isin.length).trim();
+    // quantity may be integer or decimal; currency is 3 uppercase letters; price is decimal
+    const qpM = afterIsin.match(/^([\d.]+)\s+([A-Z]{3})\s+([\d.]+)/);
+    if (!qpM) { prevLine = ""; continue; }
+
+    const quantity = parseFloat(qpM[1]);
+    let currency = qpM[2];
+    let price = parseFloat(qpM[3]);
+    if (isNaN(quantity) || isNaN(price) || quantity <= 0 || price <= 0) { prevLine = ""; continue; }
+
+    // GBX (pence) → GBP
+    if (currency === "GBX") { price = price / 100; currency = "GBP"; }
+
+    holdings.push({ name, isin, quantity, price: parseFloat(price.toFixed(4)), currency });
+    prevLine = "";
+  }
+
+  return { holdings, platform, account, asOf };
+}
+
+const YF_HEADERS_LOCAL = {
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+  "Accept": "application/json",
+};
+
+async function resolveTickerForHolding(isin: string, name: string): Promise<string | null> {
+  for (const q of [isin, name]) {
+    try {
+      const res = await fetch(
+        `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=5&newsCount=0&enableFuzzyQuery=false`,
+        { headers: YF_HEADERS_LOCAL, signal: AbortSignal.timeout(4000) }
+      );
+      if (!res.ok) continue;
+      const data = await res.json() as { quotes?: Array<{ symbol: string; quoteType: string }> };
+      const best = (data.quotes ?? []).find((r) => r.quoteType === "EQUITY" || r.quoteType === "ETF");
+      if (best?.symbol) return best.symbol;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 router.post("/parse-pdf", async (req: Request, res: Response) => {
@@ -535,6 +644,37 @@ router.post("/parse-pdf", async (req: Request, res: Response) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Parse error";
     req.log?.error({ err: e }, "PDF parse error");
+    res.status(500).json({ error: msg });
+  }
+});
+
+router.post("/parse-holdings", async (req: Request, res: Response) => {
+  try {
+    const body = req.body as { base64?: string };
+    if (!body.base64) { res.status(400).json({ error: "base64 field required" }); return; }
+
+    const buffer = Buffer.from(body.base64, "base64");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { PDFParse } = (globalThis as any).require("pdf-parse") as {
+      PDFParse: new (opts: { data: Buffer }) => { getText(): Promise<{ text: string; total: number }> };
+    };
+    const parsed = await new PDFParse({ data: buffer }).getText();
+    const { holdings: rawHoldings, platform, account, asOf } = parseHoldingsPDF(parsed.text);
+
+    // Resolve tickers in parallel (best-effort, 4s timeout per holding)
+    const holdings: ParsedHolding[] = await Promise.all(
+      rawHoldings.map(async (h) => {
+        const ticker = await resolveTickerForHolding(h.isin, h.name);
+        return { ...h, ticker: ticker ?? "", tickerResolved: !!ticker };
+      })
+    );
+
+    const resolved = holdings.filter((h) => h.tickerResolved).length;
+    req.log?.info({ platform, count: holdings.length, resolved }, "Holdings parsed");
+    res.json({ holdings, platform, account, asOf, total: holdings.length, resolved });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Parse error";
+    req.log?.error({ err: e }, "Holdings parse error");
     res.status(500).json({ error: msg });
   }
 });

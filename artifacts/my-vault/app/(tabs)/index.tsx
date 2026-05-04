@@ -143,7 +143,7 @@ function ManageBudgetsModal({ visible, onClose, budgets, monthSpend, onSave }: M
   const currentMonthName = new Date().toLocaleString("en-GB", { month: "long", year: "numeric" });
 
   return (
-    <Modal visible={visible} animationType="slide" transparent presentationStyle="pageSheet">
+    <Modal visible={visible} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
       <View style={[mStyles.modal, { backgroundColor: "#0D1121" }]}>
         <View style={mStyles.handle} />
         <View style={mStyles.titleRow}>

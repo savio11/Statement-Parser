@@ -453,7 +453,7 @@ export default function AccountsScreen() {
       </ScrollView>
 
       {/* ── Day picker modal ── */}
-      <Modal visible={showDayPicker} animationType="slide" transparent presentationStyle="pageSheet">
+      <Modal visible={showDayPicker} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
           <Text style={[styles.modalTitle, { color: colors.foreground }]}>Choose Reminder Day</Text>
@@ -487,7 +487,7 @@ export default function AccountsScreen() {
       </Modal>
 
       {/* ── Import preview modal ── */}
-      <Modal visible={previewVisible} animationType="slide" transparent presentationStyle="pageSheet">
+      <Modal visible={previewVisible} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
           <Text style={[styles.modalTitle, { color: colors.foreground }]}>
@@ -547,7 +547,7 @@ export default function AccountsScreen() {
       </Modal>
 
       {/* ── Re-categorize modal ── */}
-      <Modal visible={!!recatTx} animationType="slide" transparent presentationStyle="pageSheet">
+      <Modal visible={!!recatTx} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
           <Text style={[styles.modalTitle, { color: colors.foreground }]}>Change Category</Text>

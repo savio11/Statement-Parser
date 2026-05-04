@@ -1,4 +1,6 @@
 import { Feather } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system";
 import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -19,6 +21,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { GlassCard } from "@/components/GlassCard";
 import {
   deleteInvestment,
+  deleteInvestmentsByBroker,
   getInvestments,
   getSetting,
   insertInvestment,
@@ -41,6 +44,16 @@ interface StockResult {
   name: string;
   exchange: string;
   type: string;
+}
+
+interface ParsedHolding {
+  name: string;
+  isin: string;
+  quantity: number;
+  price: number;
+  currency: string;
+  ticker: string;
+  tickerResolved: boolean;
 }
 
 const BASE = `https://${process.env.EXPO_PUBLIC_DOMAIN ?? "localhost"}`;
@@ -96,6 +109,13 @@ export default function PortfolioScreen() {
   const [editShares, setEditShares] = useState("");
   const [editPrice, setEditPrice] = useState("");
   const [editSaving, setEditSaving] = useState(false);
+
+  // Holdings import state
+  const [showImportHoldings, setShowImportHoldings] = useState(false);
+  const [importUploading, setImportUploading] = useState(false);
+  const [importHoldings, setImportHoldings] = useState<ParsedHolding[]>([]);
+  const [importPlatform, setImportPlatform] = useState("");
+  const [importAsOf, setImportAsOf] = useState("");
 
   // Form state
   const [searchQuery, setSearchQuery] = useState("");
@@ -316,6 +336,73 @@ export default function PortfolioScreen() {
     await loadAndPrice();
   }
 
+  async function handleImportHoldings() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["application/pdf"],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled || !result.assets?.length) return;
+      const asset = result.assets[0];
+      setImportUploading(true);
+      if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+      const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: "base64" as any });
+      const response = await fetch(`${BASE}/api/parse-holdings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64 }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? "Holdings parsing failed");
+      }
+      const data = await response.json() as { holdings: ParsedHolding[]; platform: string; asOf: string };
+      if (!data.holdings?.length) {
+        Alert.alert("No holdings found", "Could not detect any positions in this PDF. Make sure it's a holdings statement.");
+        return;
+      }
+      setImportHoldings(data.holdings);
+      setImportPlatform(data.platform ?? "Broker");
+      setImportAsOf(data.asOf ?? "");
+      setShowImportHoldings(true);
+    } catch (e) {
+      Alert.alert("Import failed", e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setImportUploading(false);
+    }
+  }
+
+  async function confirmImportHoldings() {
+    const platform = importPlatform || "Broker";
+    await deleteInvestmentsByBroker(platform);
+    let imported = 0;
+    for (const h of importHoldings) {
+      const ticker = h.tickerResolved ? h.ticker : h.name.split(" ").slice(0, 2).join("_").toUpperCase();
+      await insertInvestment({
+        broker_name: platform,
+        source_type: "Statement",
+        ticker,
+        shares: h.quantity,
+        avg_price: h.price,
+        currency: h.currency,
+      });
+      imported++;
+    }
+    setShowImportHoldings(false);
+    setImportHoldings([]);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    await loadAndPrice();
+    Alert.alert(
+      "Holdings imported",
+      `${imported} position${imported !== 1 ? "s" : ""} from ${platform} saved.${
+        importHoldings.filter((h) => !h.tickerResolved).length > 0
+          ? `\n\n${importHoldings.filter((h) => !h.tickerResolved).length} couldn't be auto-matched — tap ✏️ to fix their tickers.`
+          : ""
+      }`
+    );
+  }
+
   const totalPnl = totalValue - totalCost;
   const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
   const isPnlPositive = totalPnl >= 0;
@@ -341,6 +428,15 @@ export default function PortfolioScreen() {
           <View style={styles.headerActions}>
             <TouchableOpacity onPress={loadAndPrice} style={styles.iconBtn} disabled={loading}>
               <Feather name="refresh-cw" size={16} color={loading ? colors.mutedForeground : colors.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={handleImportHoldings}
+              style={styles.iconBtn}
+              disabled={importUploading}
+            >
+              {importUploading
+                ? <ActivityIndicator size="small" color={colors.primary} />
+                : <Feather name="download" size={16} color={colors.primary} />}
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => { resetForm(); setShowAdd(true); }}
@@ -448,7 +544,7 @@ export default function PortfolioScreen() {
       </ScrollView>
 
       {/* ── Edit holding modal ── */}
-      <Modal visible={!!editingHolding} animationType="slide" transparent presentationStyle="pageSheet">
+      <Modal visible={!!editingHolding} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
           <Text style={[styles.modalTitle, { color: colors.foreground }]}>
@@ -513,8 +609,80 @@ export default function PortfolioScreen() {
         </View>
       </Modal>
 
+      {/* ── Holdings import modal ── */}
+      <Modal visible={showImportHoldings} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
+        <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
+          <View style={styles.modalHandle} />
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>
+            Import {importHoldings.length} Holdings
+          </Text>
+          <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+            {importPlatform}{importAsOf ? ` · as of ${importAsOf}` : ""}
+            {"  "}·{"  "}
+            <Text style={{ color: "#10B981" }}>
+              {importHoldings.filter((h) => h.tickerResolved).length} auto-matched
+            </Text>
+            {"  "}
+            {importHoldings.filter((h) => !h.tickerResolved).length > 0 && (
+              <Text style={{ color: "#F59E0B" }}>
+                · {importHoldings.filter((h) => !h.tickerResolved).length} unresolved
+              </Text>
+            )}
+          </Text>
+          <FlatList
+            data={importHoldings}
+            keyExtractor={(_, i) => i.toString()}
+            style={{ flex: 1 }}
+            renderItem={({ item, index }) => (
+              <View>
+                <View style={styles.importRow}>
+                  <View style={styles.importLeft}>
+                    <Text style={[styles.importName, { color: colors.foreground }]} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <Text style={[styles.importMeta, { color: colors.mutedForeground }]}>
+                      {item.quantity} sh · {item.currency} {item.price.toFixed(item.price < 1 ? 4 : 2)}
+                    </Text>
+                  </View>
+                  <View style={styles.importRight}>
+                    <View style={[
+                      styles.importTickerBadge,
+                      { backgroundColor: item.tickerResolved ? "rgba(16,185,129,0.12)" : "rgba(245,158,11,0.12)" }
+                    ]}>
+                      <Text style={[
+                        styles.importTickerText,
+                        { color: item.tickerResolved ? "#10B981" : "#F59E0B" }
+                      ]}>
+                        {item.tickerResolved ? item.ticker : "Unresolved"}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+                {index < importHoldings.length - 1 && (
+                  <View style={[styles.divider, { backgroundColor: colors.border }]} />
+                )}
+              </View>
+            )}
+          />
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 16 }]}>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
+              onPress={() => { setShowImportHoldings(false); setImportHoldings([]); }}
+            >
+              <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.confirmBtn, { backgroundColor: colors.primary }]}
+              onPress={confirmImportHoldings}
+            >
+              <Text style={{ color: "#080B14", fontFamily: "Inter_600SemiBold" }}>Import All</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* ── Add holding modal ── */}
-      <Modal visible={showAdd} animationType="slide" transparent presentationStyle="pageSheet">
+      <Modal visible={showAdd} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
           <Text style={[styles.modalTitle, { color: colors.foreground }]}>Add Holding</Text>
@@ -893,4 +1061,31 @@ const styles = StyleSheet.create({
   },
   cancelBtn: { borderWidth: 1 },
   confirmBtn: {},
+  importRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  importLeft: { flex: 1 },
+  importRight: { alignItems: "flex-end" },
+  importName: {
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  importMeta: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
+  },
+  importTickerBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  importTickerText: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
 });
