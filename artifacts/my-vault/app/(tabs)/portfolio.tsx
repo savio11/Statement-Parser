@@ -108,7 +108,12 @@ export default function PortfolioScreen() {
   const [editingHolding, setEditingHolding] = useState<HoldingWithPrice | null>(null);
   const [editShares, setEditShares] = useState("");
   const [editPrice, setEditPrice] = useState("");
+  const [editCurrency, setEditCurrency] = useState("USD");
   const [editSaving, setEditSaving] = useState(false);
+
+  // Multi-select state
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Holdings import state
   const [showImportHoldings, setShowImportHoldings] = useState(false);
@@ -292,6 +297,7 @@ export default function PortfolioScreen() {
     setEditingHolding(h);
     setEditShares(h.shares.toString());
     setEditPrice(h.avg_price.toFixed(2));
+    setEditCurrency(h.currency);
   }
 
   async function saveEdit() {
@@ -307,7 +313,7 @@ export default function PortfolioScreen() {
       return;
     }
     setEditSaving(true);
-    await updateInvestment(editingHolding.id, sharesNum, priceNum);
+    await updateInvestment(editingHolding.id, sharesNum, priceNum, editCurrency);
     setEditSaving(false);
     setEditingHolding(null);
     if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -317,6 +323,33 @@ export default function PortfolioScreen() {
   async function removeHolding(id: string) {
     await deleteInvestment(id);
     setEditingHolding(null);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    await loadAndPrice();
+  }
+
+  function enterSelectMode(id: string) {
+    setSelectMode(true);
+    setSelectedIds(new Set([id]));
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function cancelSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  async function deleteSelected() {
+    for (const id of selectedIds) {
+      await deleteInvestment(id);
+    }
+    cancelSelectMode();
     if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     await loadAndPrice();
   }
@@ -409,34 +442,54 @@ export default function PortfolioScreen() {
         keyboardShouldPersistTaps="handled"
       >
         {/* Header */}
-        <View style={styles.header}>
-          <View>
-            <Text style={[styles.screenTitle, { color: colors.foreground }]}>Portfolio</Text>
-            <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>
-              {holdings.length} holding{holdings.length !== 1 ? "s" : ""}
+        {selectMode ? (
+          <View style={[styles.header, styles.selectBar]}>
+            <TouchableOpacity onPress={cancelSelectMode} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium", fontSize: 15 }}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={{ color: colors.foreground, fontFamily: "Inter_600SemiBold", fontSize: 15 }}>
+              {selectedIds.size} selected
             </Text>
-          </View>
-          <View style={styles.headerActions}>
-            <TouchableOpacity onPress={loadAndPrice} style={styles.iconBtn} disabled={loading}>
-              <Feather name="refresh-cw" size={16} color={loading ? colors.mutedForeground : colors.primary} />
-            </TouchableOpacity>
             <TouchableOpacity
-              onPress={handleImportHoldings}
-              style={styles.iconBtn}
-              disabled={importUploading}
+              onPress={deleteSelected}
+              disabled={selectedIds.size === 0}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              {importUploading
-                ? <ActivityIndicator size="small" color={colors.primary} />
-                : <Feather name="download" size={16} color={colors.primary} />}
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => { resetForm(); setShowAdd(true); }}
-              style={[styles.addBtn, { backgroundColor: colors.primary }]}
-            >
-              <Feather name="plus" size={16} color={colors.background} />
+              <Text style={{ color: selectedIds.size > 0 ? "#EF4444" : colors.mutedForeground, fontFamily: "Inter_600SemiBold", fontSize: 15 }}>
+                Delete
+              </Text>
             </TouchableOpacity>
           </View>
-        </View>
+        ) : (
+          <View style={styles.header}>
+            <View>
+              <Text style={[styles.screenTitle, { color: colors.foreground }]}>Portfolio</Text>
+              <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>
+                {holdings.length} holding{holdings.length !== 1 ? "s" : ""}
+              </Text>
+            </View>
+            <View style={styles.headerActions}>
+              <TouchableOpacity onPress={loadAndPrice} style={styles.iconBtn} disabled={loading}>
+                <Feather name="refresh-cw" size={16} color={loading ? colors.mutedForeground : colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleImportHoldings}
+                style={styles.iconBtn}
+                disabled={importUploading}
+              >
+                {importUploading
+                  ? <ActivityIndicator size="small" color={colors.primary} />
+                  : <Feather name="download" size={16} color={colors.primary} />}
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => { resetForm(); setShowAdd(true); }}
+                style={[styles.addBtn, { backgroundColor: colors.primary }]}
+              >
+                <Feather name="plus" size={16} color={colors.background} />
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {/* Total portfolio value */}
         <GlassCard style={styles.netWorthCard} padding={20}>
@@ -490,9 +543,27 @@ export default function PortfolioScreen() {
           ) : (
             holdings.map((h, i) => {
               const isUp = (h.pnl ?? 0) >= 0;
+              const isSelected = selectedIds.has(h.id);
               return (
                 <View key={h.id}>
-                  <View style={styles.holdingRow}>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onLongPress={() => enterSelectMode(h.id)}
+                    onPress={() => selectMode ? toggleSelect(h.id) : openEdit(h)}
+                    style={[
+                      styles.holdingRow,
+                      isSelected && { backgroundColor: "rgba(0,212,255,0.07)" },
+                    ]}
+                  >
+                    {selectMode && (
+                      <View style={[
+                        styles.checkbox,
+                        { borderColor: isSelected ? colors.primary : colors.border },
+                        isSelected && { backgroundColor: colors.primary },
+                      ]}>
+                        {isSelected && <Feather name="check" size={11} color={colors.background} />}
+                      </View>
+                    )}
                     <View style={[styles.tickerBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
                       <Text style={[styles.tickerText, { color: colors.primary }]}>{h.ticker}</Text>
                     </View>
@@ -518,10 +589,12 @@ export default function PortfolioScreen() {
                         <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>No price</Text>
                       )}
                     </View>
-                    <TouchableOpacity onPress={() => openEdit(h)} style={styles.editBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                      <Feather name="edit-2" size={14} color={colors.mutedForeground} />
-                    </TouchableOpacity>
-                  </View>
+                    {!selectMode && (
+                      <View style={styles.editBtn}>
+                        <Feather name="edit-2" size={14} color={colors.mutedForeground} />
+                      </View>
+                    )}
+                  </TouchableOpacity>
                   {i < holdings.length - 1 && <View style={[styles.divider, { backgroundColor: colors.border }]} />}
                 </View>
               );
@@ -569,6 +642,27 @@ export default function PortfolioScreen() {
               onChangeText={setEditPrice}
               keyboardType="decimal-pad"
             />
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Stock Currency</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 2 }}>
+              {CURRENCIES.map((c) => (
+                <TouchableOpacity
+                  key={c}
+                  onPress={() => setEditCurrency(c)}
+                  style={[
+                    styles.currencyChip,
+                    { borderColor: editCurrency === c ? colors.primary : colors.border },
+                    editCurrency === c && { backgroundColor: colors.primary },
+                  ]}
+                >
+                  <Text style={[styles.currencyChipText, { color: editCurrency === c ? colors.background : colors.mutedForeground }]}>
+                    {c}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
           </View>
 
           <View style={[styles.modalActions, { paddingBottom: insets.bottom + 20 }]}>
@@ -1078,5 +1172,19 @@ const styles = StyleSheet.create({
   importTickerText: {
     fontSize: 12,
     fontFamily: "Inter_700Bold",
+  },
+  selectBar: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    marginRight: 8,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

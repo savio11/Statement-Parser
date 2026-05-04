@@ -609,7 +609,29 @@ const YF_HEADERS_LOCAL = {
   "Accept": "application/json",
 };
 
-async function resolveTickerForHolding(isin: string, name: string): Promise<string | null> {
+/** Map a Yahoo Finance exchange code to an ISO currency code. */
+function exchangeToCurrency(exchange: string): string | null {
+  if (!exchange) return null;
+  const e = exchange.toUpperCase();
+  if (/NYSE|NASDAQ|CBOE|BATS|AMEX|OTC/.test(e)) return "USD";
+  if (/\bLSE\b|XLON|\bLON\b|AIM/.test(e)) return "GBP";
+  if (/XETRA|XFRA|\bFRA\b|\bFSX\b|\bGER\b/.test(e)) return "EUR";
+  if (/TSX|TSXV/.test(e)) return "CAD";
+  if (/\bASX\b|XASX/.test(e)) return "AUD";
+  if (/\bTYO\b|XTOK|XJPX/.test(e)) return "JPY";
+  if (/\bAMS\b|XAMS|\bPAR\b|XPAR|\bMIL\b|XMIL|\bBRU\b|\bLIS\b/.test(e)) return "EUR";
+  if (/\bSTO\b|XSTO/.test(e)) return "SEK";
+  if (/\bHKG\b|XHKG/.test(e)) return "HKD";
+  if (/\bNSE\b|\bBSE\b|XBOM|XNSE/.test(e)) return "INR";
+  if (/\bSGX\b/.test(e)) return "SGD";
+  if (/\bJSE\b/.test(e)) return "ZAR";
+  return null;
+}
+
+async function resolveTickerForHolding(
+  isin: string,
+  name: string
+): Promise<{ ticker: string; currency: string | null } | null> {
   for (const q of [isin, name]) {
     try {
       const res = await fetch(
@@ -617,9 +639,14 @@ async function resolveTickerForHolding(isin: string, name: string): Promise<stri
         { headers: YF_HEADERS_LOCAL, signal: AbortSignal.timeout(4000) }
       );
       if (!res.ok) continue;
-      const data = await res.json() as { quotes?: Array<{ symbol: string; quoteType: string }> };
+      const data = await res.json() as {
+        quotes?: Array<{ symbol: string; quoteType: string; exchange?: string; exchDisp?: string }>;
+      };
       const best = (data.quotes ?? []).find((r) => r.quoteType === "EQUITY" || r.quoteType === "ETF");
-      if (best?.symbol) return best.symbol;
+      if (best?.symbol) {
+        const exch = best.exchDisp ?? best.exchange ?? "";
+        return { ticker: best.symbol, currency: exchangeToCurrency(exch) };
+      }
     } catch { /* try next */ }
   }
   return null;
@@ -664,8 +691,10 @@ router.post("/parse-holdings", async (req: Request, res: Response) => {
     // Resolve tickers in parallel (best-effort, 4s timeout per holding)
     const holdings: ParsedHolding[] = await Promise.all(
       rawHoldings.map(async (h) => {
-        const ticker = await resolveTickerForHolding(h.isin, h.name);
-        return { ...h, ticker: ticker ?? "", tickerResolved: !!ticker };
+        const result = await resolveTickerForHolding(h.isin, h.name);
+        // Prefer exchange-inferred currency (more reliable than PDF column order)
+        const currency = result?.currency ?? h.currency;
+        return { ...h, currency, ticker: result?.ticker ?? "", tickerResolved: !!(result?.ticker) };
       })
     );
 
