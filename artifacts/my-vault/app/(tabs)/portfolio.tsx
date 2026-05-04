@@ -93,7 +93,7 @@ async function fetchExchangeRate(from: string, to: string): Promise<number> {
   }
 }
 
-const CURRENCIES = ["GBP", "USD", "EUR", "CHF", "JPY", "CAD", "AUD"];
+const CURRENCIES = ["GBP", "USD", "EUR", "INR", "CHF", "JPY", "CAD", "AUD", "SGD", "HKD", "AED"];
 
 export default function PortfolioScreen() {
   const colors = useColors();
@@ -524,17 +524,18 @@ export default function PortfolioScreen() {
               )}
             </>
           )}
-        </GlassCard>
-
-        {/* Home currency picker */}
-        <View style={styles.currencyRow}>
-          <Text style={[styles.currencyLabel, { color: colors.mutedForeground }]}>Home:</Text>
+          <View style={[styles.cardDivider, { backgroundColor: colors.border }]} />
+          <Text style={[styles.currencyLabel, { color: colors.mutedForeground, marginBottom: 8 }]}>Display in</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             {CURRENCIES.map((c) => (
               <TouchableOpacity
                 key={c}
                 onPress={() => changeHomeCurrency(c)}
-                style={[styles.currencyChip, homeCurrency === c && { backgroundColor: colors.primary }, { borderColor: colors.border }]}
+                style={[
+                  styles.currencyChip,
+                  { borderColor: homeCurrency === c ? colors.primary : colors.border },
+                  homeCurrency === c && { backgroundColor: colors.primary },
+                ]}
               >
                 <Text style={[styles.currencyChipText, { color: homeCurrency === c ? colors.background : colors.mutedForeground }]}>
                   {c}
@@ -542,7 +543,7 @@ export default function PortfolioScreen() {
               </TouchableOpacity>
             ))}
           </ScrollView>
-        </View>
+        </GlassCard>
 
         {/* Holdings list */}
         <GlassCard padding={0} style={{ marginBottom: 12 }}>
@@ -963,6 +964,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_500Medium",
     marginTop: 6,
+  },
+  cardDivider: {
+    height: StyleSheet.hairlineWidth,
+    marginVertical: 16,
   },
   currencyRow: {
     flexDirection: "row",
