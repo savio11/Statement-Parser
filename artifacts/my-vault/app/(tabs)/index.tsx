@@ -1,5 +1,5 @@
 import { Feather } from "@expo/vector-icons";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useFocusEffect } from "expo-router";
 import {
   Dimensions,
@@ -28,16 +28,18 @@ import {
   setBudget,
   deleteBudget,
   getCategoryBreakdown,
-  getMonthlyCashflow,
+  getMonthlyCashflowByCurrency,
+  getTotalsByCurrency,
   getSetting,
+  setSetting,
   getThisMonthCategorySpend,
   getTransactions,
-  getTotals,
   type CategoryTotal,
   type MonthlyCashflow,
   type Transaction,
 } from "@/lib/database";
 import { detectSubscriptions, type DetectedSubscription } from "@/lib/subscriptions";
+import { CURRENCIES, getCurrencySymbol, fetchExchangeRate } from "@/lib/currency";
 import { useColors } from "@/hooks/useColors";
 
 const MONTH_SHORT: Record<string, string> = {
@@ -109,10 +111,11 @@ interface ManageBudgetsModalProps {
   onClose: () => void;
   budgets: Record<string, number>;
   monthSpend: Record<string, number>;
+  currencySymbol: string;
   onSave: (updated: Record<string, number>) => Promise<void>;
 }
 
-function ManageBudgetsModal({ visible, onClose, budgets, monthSpend, onSave }: ManageBudgetsModalProps) {
+function ManageBudgetsModal({ visible, onClose, budgets, monthSpend, currencySymbol, onSave }: ManageBudgetsModalProps) {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -181,7 +184,7 @@ function ManageBudgetsModal({ visible, onClose, budgets, monthSpend, onSave }: M
                   <Text style={[mStyles.catName, { color: colors.foreground }]}>{cat}</Text>
                   {spent > 0 && (
                     <Text style={[mStyles.catSpent, { color: colors.mutedForeground }]}>
-                      £{spent.toLocaleString("en-GB", { minimumFractionDigits: 0 })} spent this month
+                      {currencySymbol}{spent.toLocaleString("en-GB", { minimumFractionDigits: 0 })} spent this month
                     </Text>
                   )}
                   {pct !== null && (
@@ -199,7 +202,7 @@ function ManageBudgetsModal({ visible, onClose, budgets, monthSpend, onSave }: M
                   )}
                 </View>
                 <View style={[mStyles.inputWrap, { borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" }]}>
-                  <Text style={[mStyles.pound, { color: colors.mutedForeground }]}>£</Text>
+                  <Text style={[mStyles.pound, { color: colors.mutedForeground }]}>{currencySymbol}</Text>
                   <TextInput
                     style={[mStyles.input, { color: colors.foreground }]}
                     value={draft[cat] ?? ""}
@@ -313,20 +316,62 @@ export default function DashboardScreen() {
   const [portfolioValue, setPortfolioValue] = useState(0);
   const [cfYear, setCfYear] = useState<string>("all");
   const [cfQuarter, setCfQuarter] = useState<string>("all");
+  const [dashboardCurrency, setDashboardCurrency] = useState("GBP");
 
   const load = useCallback(async () => {
-    const [cf, allTx, tot, bk, bg, ms, pv] = await Promise.all([
-      getMonthlyCashflow(),
+    const [cfRaw, allTx, totByCur, bk, bg, ms, pv, savedCur] = await Promise.all([
+      getMonthlyCashflowByCurrency(),
       getTransactions(500),
-      getTotals(),
+      getTotalsByCurrency(),
       getCategoryBreakdown(),
       getBudgets(),
       getThisMonthCategorySpend(),
       getSetting("portfolio_total_value", "0"),
+      getSetting("home_currency", "GBP"),
     ]);
-    setCashflow(cf);
+
+    const dc = savedCur || "GBP";
+    setDashboardCurrency(dc);
+
+    // Collect all currencies present in transaction data
+    const allCurrencies = [...new Set([
+      ...Object.keys(totByCur),
+      ...cfRaw.map((r) => r.currency),
+    ])];
+
+    // Fetch all FX rates in parallel
+    const rateResults = await Promise.all(
+      allCurrencies.map((c) => fetchExchangeRate(c, dc).then((r) => [c, r] as [string, number]))
+    );
+    const rateMap = Object.fromEntries(rateResults);
+
+    // Convert totals to display currency
+    let credits = 0, debits = 0;
+    for (const [cur, { credits: c, debits: d }] of Object.entries(totByCur)) {
+      const rate = rateMap[cur] ?? 1;
+      credits += c * rate;
+      debits += d * rate;
+    }
+    setTotals({
+      totalCredits: +credits.toFixed(2),
+      totalDebits: +debits.toFixed(2),
+      balance: +(credits - debits).toFixed(2),
+    });
+
+    // Convert cashflow to display currency
+    const cfByMonth: Record<string, { credits: number; debits: number }> = {};
+    for (const row of cfRaw) {
+      const rate = rateMap[row.currency] ?? 1;
+      if (!cfByMonth[row.month]) cfByMonth[row.month] = { credits: 0, debits: 0 };
+      cfByMonth[row.month].credits += row.credits * rate;
+      cfByMonth[row.month].debits += row.debits * rate;
+    }
+    const cfConverted = Object.entries(cfByMonth)
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([month, v]) => ({ month, credits: +v.credits.toFixed(2), debits: +v.debits.toFixed(2) }));
+    setCashflow(cfConverted);
+
     setRecent(allTx.slice(0, 10));
-    setTotals(tot);
     setBreakdown(bk);
     setBudgets(bg);
     setMonthSpend(ms);
@@ -342,18 +387,24 @@ export default function DashboardScreen() {
     setRefreshing(false);
   }, [load]);
 
+  async function changeDashboardCurrency(c: string) {
+    setDashboardCurrency(c);
+    await setSetting("home_currency", c);
+    load();
+  }
+
   async function handleSaveBudgets(updated: Record<string, number>) {
     const old = budgets;
-    // delete removed budgets
     for (const cat of ALL_CATEGORIES) {
       if (old[cat] != null && updated[cat] == null) await deleteBudget(cat);
     }
-    // upsert new/changed budgets
     for (const [cat, limit] of Object.entries(updated)) {
       await setBudget(cat, limit);
     }
     await load();
   }
+
+  const sym = getCurrencySymbol(dashboardCurrency);
 
   const formatAmount = (n: number) =>
     n.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -400,24 +451,45 @@ export default function DashboardScreen() {
         <Text style={[styles.screenTitle, { color: colors.foreground }]}>My Vault</Text>
         <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>Financial overview</Text>
 
-        {/* Net Balance card — always visible, includes portfolio when available */}
+        {/* Net Balance card */}
         <GlassCard style={{ marginBottom: 10, padding: 16 }}>
           <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Net Balance</Text>
           <Text style={[styles.statValue, { color: colors.primary, fontSize: 26, marginBottom: portfolioValue > 0 ? 4 : 0 }]}>
-            £{formatAmount(totals.balance + portfolioValue)}
+            {sym}{formatAmount(totals.balance + portfolioValue)}
           </Text>
           {portfolioValue > 0 && (
             <View style={{ flexDirection: "row", gap: 14, marginTop: 2 }}>
               <Text style={{ fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>
                 {"Bank "}
-                <Text style={{ color: colors.foreground }}>£{formatAmount(totals.balance)}</Text>
+                <Text style={{ color: colors.foreground }}>{sym}{formatAmount(totals.balance)}</Text>
               </Text>
               <Text style={{ fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>
                 {"Portfolio "}
-                <Text style={{ color: colors.credit }}>£{formatAmount(portfolioValue)}</Text>
+                <Text style={{ color: colors.credit }}>{sym}{formatAmount(portfolioValue)}</Text>
               </Text>
             </View>
           )}
+
+          {/* Currency picker */}
+          <View style={[styles.cardDivider, { backgroundColor: colors.border }]} />
+          <Text style={[styles.statLabel, { color: colors.mutedForeground, marginBottom: 6 }]}>Display in</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {CURRENCIES.map((c) => (
+              <TouchableOpacity
+                key={c}
+                onPress={() => changeDashboardCurrency(c)}
+                style={[
+                  styles.cfChip,
+                  { borderColor: dashboardCurrency === c ? colors.primary : colors.border },
+                  dashboardCurrency === c && { backgroundColor: colors.primary },
+                ]}
+              >
+                <Text style={[styles.cfChipText, { color: dashboardCurrency === c ? colors.background : colors.mutedForeground }]}>
+                  {c}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
         </GlassCard>
 
         <View style={styles.statRow}>
@@ -426,14 +498,14 @@ export default function DashboardScreen() {
               <Feather name="arrow-down-circle" size={14} color={colors.credit} />
               <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Income</Text>
             </View>
-            <Text style={[styles.statValue, { color: colors.credit }]}>£{formatAmount(totals.totalCredits)}</Text>
+            <Text style={[styles.statValue, { color: colors.credit }]}>{sym}{formatAmount(totals.totalCredits)}</Text>
           </GlassCard>
           <GlassCard style={styles.statCard}>
             <View style={styles.statHeaderRow}>
               <Feather name="arrow-up-circle" size={14} color={colors.debit} />
               <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Spent</Text>
             </View>
-            <Text style={[styles.statValue, { color: colors.debit }]}>£{formatAmount(totals.totalDebits)}</Text>
+            <Text style={[styles.statValue, { color: colors.debit }]}>{sym}{formatAmount(totals.totalDebits)}</Text>
           </GlassCard>
         </View>
 
@@ -455,7 +527,6 @@ export default function DashboardScreen() {
 
           {cfYears.length > 0 && (
             <>
-              {/* Year selector */}
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
                 {(["all", ...cfYears] as string[]).map((y) => (
                   <TouchableOpacity
@@ -474,7 +545,6 @@ export default function DashboardScreen() {
                 ))}
               </ScrollView>
 
-              {/* Quarter selector — only shown when a specific year is selected */}
               {cfYear !== "all" && (
                 <View style={styles.cfQuarterRow}>
                   {(["all", "Q1", "Q2", "Q3", "Q4"] as string[]).map((q) => (
@@ -568,7 +638,7 @@ export default function DashboardScreen() {
               <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Subscriptions</Text>
               {subscriptions.length > 0 && (
                 <Text style={[styles.subTotalText, { color: colors.mutedForeground }]}>
-                  £{totalMonthlySubCost.toFixed(2)}/mo detected
+                  {sym}{totalMonthlySubCost.toFixed(2)}/mo detected
                 </Text>
               )}
             </View>
@@ -628,6 +698,7 @@ export default function DashboardScreen() {
         onClose={() => setBudgetModalVisible(false)}
         budgets={budgets}
         monthSpend={monthSpend}
+        currencySymbol={sym}
         onSave={handleSaveBudgets}
       />
     </>
@@ -643,7 +714,6 @@ const styles = StyleSheet.create({
   },
   statRow: { flexDirection: "row", gap: 10, marginBottom: 10 },
   statCard: { flex: 1, padding: 16 },
-  statCardWide: { flex: 1 },
   statHeaderRow: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 4 },
   statLabel: { fontSize: 12, fontFamily: "Inter_400Regular", marginBottom: 4 },
   statValue: { fontSize: 20, fontWeight: "700", fontFamily: "Inter_700Bold", letterSpacing: -0.3 },
@@ -701,5 +771,9 @@ const styles = StyleSheet.create({
   cfQuarterRow: {
     flexDirection: "row",
     marginBottom: 8,
+  },
+  cardDivider: {
+    height: StyleSheet.hairlineWidth,
+    marginVertical: 12,
   },
 });

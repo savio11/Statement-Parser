@@ -27,8 +27,16 @@ import {
   insertInvestment,
   setSetting,
   updateInvestment,
+  getAssets,
+  insertAsset,
+  updateAsset,
+  deleteAsset,
+  ASSET_TYPES,
+  ASSET_TYPE_ICONS,
   type Investment,
+  type Asset,
 } from "@/lib/database";
+import { CURRENCIES, fetchExchangeRate } from "@/lib/currency";
 import { useColors } from "@/hooks/useColors";
 
 interface HoldingWithPrice extends Investment {
@@ -81,19 +89,6 @@ async function searchStocksViaProxy(query: string): Promise<StockResult[]> {
   }
 }
 
-async function fetchExchangeRate(from: string, to: string): Promise<number> {
-  if (from === to) return 1;
-  try {
-    const res = await fetch(`${BASE}/api/stocks/fx?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-    if (!res.ok) return 1;
-    const data = await res.json();
-    return data?.rate ?? 1;
-  } catch {
-    return 1;
-  }
-}
-
-const CURRENCIES = ["GBP", "USD", "EUR", "INR", "CHF", "JPY", "CAD", "AUD", "SGD", "HKD", "AED"];
 
 export default function PortfolioScreen() {
   const colors = useColors();
@@ -122,6 +117,17 @@ export default function PortfolioScreen() {
   const [importPlatform, setImportPlatform] = useState("");
   const [importAsOf, setImportAsOf] = useState("");
 
+  // Manual assets state
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [showAddAsset, setShowAddAsset] = useState(false);
+  const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
+  const [assetName, setAssetName] = useState("");
+  const [assetType, setAssetType] = useState<string>(ASSET_TYPES[0]);
+  const [assetValue, setAssetValue] = useState("");
+  const [assetCurrency, setAssetCurrency] = useState("GBP");
+  const [assetNotes, setAssetNotes] = useState("");
+  const [assetSaving, setAssetSaving] = useState(false);
+
   // Form state
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<StockResult[]>([]);
@@ -137,18 +143,32 @@ export default function PortfolioScreen() {
 
   const loadAndPrice = useCallback(async () => {
     setLoading(true);
-    const [invs, savedCurrency] = await Promise.all([
+    const [invs, manualAssets, savedCurrency] = await Promise.all([
       getInvestments(),
+      getAssets(),
       getSetting("home_currency", "GBP"),
     ]);
     const hc = savedCurrency;
     setHomeCurrency(hc);
+    setAssets(manualAssets);
+
+    // Collect all currencies (stocks + assets)
+    const assetCurrencies = manualAssets.map((a) => a.currency);
 
     if (invs.length === 0) {
+      // Still need to convert asset values
+      const uniqueAssetCurs = [...new Set(assetCurrencies)];
+      const assetRates = await Promise.all(
+        uniqueAssetCurs.map((c) => fetchExchangeRate(c, hc).then((r) => [c, r] as [string, number]))
+      );
+      const assetRateMap = Object.fromEntries(assetRates);
+      const assetTotal = manualAssets.reduce((s, a) => s + a.value * (assetRateMap[a.currency] ?? 1), 0);
+
       setHoldings([]);
-      setTotalValue(0);
+      setTotalValue(assetTotal);
       setTotalCost(0);
       setLoading(false);
+      setSetting("portfolio_total_value", assetTotal.toFixed(2)).catch(() => {});
       return;
     }
 
@@ -160,10 +180,11 @@ export default function PortfolioScreen() {
     );
     const priceMap = Object.fromEntries(priceResults);
 
-    // Collect all currencies needed: stored (for cost basis) + live price (for MV)
+    // Collect all currencies needed: stored (for cost basis) + live price (for MV) + assets
     const allCurrencies = [...new Set([
       ...invs.map((i) => i.currency),
       ...priceResults.map(([, r]) => r?.currency).filter((c): c is string => !!c),
+      ...assetCurrencies,
     ])];
 
     const rateResults = await Promise.all(
@@ -176,8 +197,6 @@ export default function PortfolioScreen() {
     const enriched: HoldingWithPrice[] = invs.map((inv) => {
       const priceInfo = priceMap[inv.ticker] ?? null;
       const currentPrice = priceInfo?.price ?? null;
-      // Use Yahoo Finance's live price currency for MV conversion (always correct),
-      // fall back to stored currency if price unavailable
       const priceCurrency = priceInfo?.currency ?? inv.currency;
       const costRate = rateMap[inv.currency] ?? 1;
       const priceRate = rateMap[priceCurrency] ?? 1;
@@ -187,7 +206,6 @@ export default function PortfolioScreen() {
         const mv = inv.shares * currentPrice;
         const mvHome = mv * priceRate;
         tv += mvHome;
-        const costHome = cost * costRate;
         return {
           ...inv,
           currentPrice,
@@ -200,11 +218,15 @@ export default function PortfolioScreen() {
       return { ...inv, currentPrice: null, marketValue: null, pnl: null, pnlPct: null, valueInHomeCurrency: null };
     });
 
+    // Add manual asset values
+    const assetTotal = manualAssets.reduce((s, a) => s + a.value * (rateMap[a.currency] ?? 1), 0);
+    const grandTotal = tv + assetTotal;
+
     setHoldings(enriched);
-    setTotalValue(tv);
+    setTotalValue(grandTotal);
     setTotalCost(tc);
     setLoading(false);
-    setSetting("portfolio_total_value", tv.toFixed(2)).catch(() => {});
+    setSetting("portfolio_total_value", grandTotal.toFixed(2)).catch(() => {});
   }, []);
 
   useEffect(() => { loadAndPrice(); }, [loadAndPrice]);
@@ -440,6 +462,63 @@ export default function PortfolioScreen() {
     );
   }
 
+  function openAddAsset() {
+    setEditingAsset(null);
+    setAssetName("");
+    setAssetType(ASSET_TYPES[0]);
+    setAssetValue("");
+    setAssetCurrency("GBP");
+    setAssetNotes("");
+    setShowAddAsset(true);
+  }
+
+  function openEditAsset(a: Asset) {
+    setEditingAsset(a);
+    setAssetName(a.name);
+    setAssetType(a.type);
+    setAssetValue(a.value.toString());
+    setAssetCurrency(a.currency);
+    setAssetNotes(a.notes ?? "");
+    setShowAddAsset(true);
+  }
+
+  async function saveAsset() {
+    const val = parseFloat(assetValue);
+    if (!assetName.trim()) {
+      Alert.alert("Missing name", "Please enter a name for this asset.");
+      return;
+    }
+    if (isNaN(val) || val <= 0) {
+      Alert.alert("Invalid value", "Please enter a valid asset value.");
+      return;
+    }
+    setAssetSaving(true);
+    if (editingAsset) {
+      await updateAsset(editingAsset.id, { name: assetName.trim(), type: assetType, value: val, currency: assetCurrency, notes: assetNotes });
+    } else {
+      await insertAsset({ name: assetName.trim(), type: assetType, value: val, currency: assetCurrency, notes: assetNotes });
+    }
+    setAssetSaving(false);
+    setShowAddAsset(false);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    await loadAndPrice();
+  }
+
+  async function removeAsset(id: string) {
+    Alert.alert("Delete Asset", "Remove this asset from your portfolio?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete", style: "destructive",
+        onPress: async () => {
+          await deleteAsset(id);
+          setShowAddAsset(false);
+          if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          await loadAndPrice();
+        },
+      },
+    ]);
+  }
+
   const totalPnl = totalValue - totalCost;
   const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
   const isPnlPositive = totalPnl >= 0;
@@ -493,6 +572,12 @@ export default function PortfolioScreen() {
                 {importUploading
                   ? <ActivityIndicator size="small" color={colors.primary} />
                   : <Feather name="download" size={16} color={colors.primary} />}
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={openAddAsset}
+                style={[styles.addBtn, { backgroundColor: "rgba(0,212,255,0.15)", borderWidth: 1, borderColor: colors.primary }]}
+              >
+                <Feather name="home" size={14} color={colors.primary} />
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => { resetForm(); setShowAdd(true); }}
@@ -617,8 +702,54 @@ export default function PortfolioScreen() {
         </GlassCard>
 
         <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-          Tap ✏️ to edit · Prices via Yahoo Finance
+          Tap ✏️ to edit stocks · Prices via Yahoo Finance
         </Text>
+
+        {/* Other Assets section */}
+        <View style={styles.assetSectionHeader}>
+          <Text style={[styles.assetSectionTitle, { color: colors.foreground }]}>Other Assets</Text>
+          <TouchableOpacity onPress={openAddAsset} style={[styles.assetAddBtn, { borderColor: colors.primary }]}>
+            <Feather name="plus" size={13} color={colors.primary} />
+            <Text style={[styles.assetAddBtnText, { color: colors.primary }]}>Add</Text>
+          </TouchableOpacity>
+        </View>
+        <GlassCard padding={0} style={{ marginBottom: 20 }}>
+          {assets.length === 0 ? (
+            <TouchableOpacity style={styles.emptyBox} onPress={openAddAsset}>
+              <Text style={{ fontSize: 28 }}>🏠</Text>
+              <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+                Add property, gold, fixed deposits, bonds and more
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            assets.map((a, i) => (
+              <View key={a.id}>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => openEditAsset(a)}
+                  style={styles.assetRow}
+                >
+                  <View style={[styles.assetIconBadge, { backgroundColor: "rgba(0,212,255,0.08)" }]}>
+                    <Text style={{ fontSize: 20 }}>{ASSET_TYPE_ICONS[a.type] ?? "💼"}</Text>
+                  </View>
+                  <View style={styles.assetMiddle}>
+                    <Text style={[styles.assetName, { color: colors.foreground }]} numberOfLines={1}>{a.name}</Text>
+                    <Text style={[styles.assetMeta, { color: colors.mutedForeground }]}>{a.type}</Text>
+                  </View>
+                  <View style={styles.assetRight}>
+                    <Text style={[styles.assetValue, { color: colors.foreground }]}>
+                      {a.currency} {a.value.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                    </Text>
+                  </View>
+                  <View style={styles.editBtn}>
+                    <Feather name="edit-2" size={14} color={colors.mutedForeground} />
+                  </View>
+                </TouchableOpacity>
+                {i < assets.length - 1 && <View style={[styles.divider, { backgroundColor: colors.border }]} />}
+              </View>
+            ))
+          )}
+        </GlassCard>
       </ScrollView>
 
       {/* ── Edit holding modal ── */}
@@ -775,6 +906,132 @@ export default function PortfolioScreen() {
               onPress={confirmImportHoldings}
             >
               <Text style={{ color: "#080B14", fontFamily: "Inter_600SemiBold" }}>Import All</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Add / Edit Asset modal ── */}
+      <Modal visible={showAddAsset} animationType="slide" presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}>
+        <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
+          <View style={styles.modalHandle} />
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>
+            {editingAsset ? "Edit Asset" : "Add Asset"}
+          </Text>
+          <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+            Property, savings, gold, fixed deposits and more
+          </Text>
+
+          {/* Asset type picker */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Asset Type</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {ASSET_TYPES.map((t) => (
+                <TouchableOpacity
+                  key={t}
+                  onPress={() => setAssetType(t)}
+                  style={[
+                    styles.assetTypeChip,
+                    { borderColor: assetType === t ? colors.primary : colors.border },
+                    assetType === t && { backgroundColor: "rgba(0,212,255,0.12)" },
+                  ]}
+                >
+                  <Text style={{ fontSize: 15 }}>{ASSET_TYPE_ICONS[t] ?? "💼"}</Text>
+                  <Text style={[styles.assetTypeChipText, { color: assetType === t ? colors.primary : colors.mutedForeground }]}>
+                    {t}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* Asset name */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Name</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. My London Flat"
+              placeholderTextColor={colors.mutedForeground}
+              value={assetName}
+              onChangeText={setAssetName}
+              autoCapitalize="words"
+            />
+          </View>
+
+          {/* Value */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Current Value</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. 250000"
+              placeholderTextColor={colors.mutedForeground}
+              value={assetValue}
+              onChangeText={setAssetValue}
+              keyboardType="decimal-pad"
+            />
+          </View>
+
+          {/* Currency */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Currency</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {CURRENCIES.map((c) => (
+                <TouchableOpacity
+                  key={c}
+                  onPress={() => setAssetCurrency(c)}
+                  style={[
+                    styles.currencyChip,
+                    { borderColor: assetCurrency === c ? colors.primary : colors.border },
+                    assetCurrency === c && { backgroundColor: colors.primary },
+                  ]}
+                >
+                  <Text style={[styles.currencyChipText, { color: assetCurrency === c ? colors.background : colors.mutedForeground }]}>
+                    {c}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* Notes */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Notes (optional)</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. Joint ownership, bank name…"
+              placeholderTextColor={colors.mutedForeground}
+              value={assetNotes}
+              onChangeText={setAssetNotes}
+            />
+          </View>
+
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 20 }]}>
+            {editingAsset && (
+              <TouchableOpacity
+                style={[styles.modalBtn, { borderWidth: 1, borderRadius: 12, borderColor: "#EF4444", flex: 0.5 }]}
+                onPress={() => removeAsset(editingAsset.id)}
+              >
+                <Feather name="trash-2" size={14} color="#EF4444" />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
+              onPress={() => setShowAddAsset(false)}
+            >
+              <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.confirmBtn, { backgroundColor: colors.primary, opacity: assetSaving ? 0.7 : 1 }]}
+              onPress={saveAsset}
+              disabled={assetSaving}
+            >
+              {assetSaving ? (
+                <ActivityIndicator color={colors.background} size="small" />
+              ) : (
+                <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>
+                  {editingAsset ? "Save" : "Add Asset"}
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -1204,5 +1461,76 @@ const styles = StyleSheet.create({
     marginRight: 8,
     alignItems: "center",
     justifyContent: "center",
+  },
+  assetSectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  assetSectionTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    fontFamily: "Inter_600SemiBold",
+  },
+  assetAddBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  assetAddBtnText: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+  },
+  assetRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  assetIconBadge: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  assetMiddle: { flex: 1 },
+  assetName: {
+    fontSize: 14,
+    fontWeight: "600",
+    fontFamily: "Inter_600SemiBold",
+  },
+  assetMeta: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
+  },
+  assetRight: { alignItems: "flex-end" },
+  assetValue: {
+    fontSize: 14,
+    fontWeight: "600",
+    fontFamily: "Inter_600SemiBold",
+  },
+  assetTypeChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    marginRight: 6,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  assetTypeChipText: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
   },
 });

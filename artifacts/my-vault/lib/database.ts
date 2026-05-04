@@ -11,6 +11,7 @@ export interface Transaction {
   type: "credit" | "debit";
   category: string;
   source_type: string;
+  currency: string;
   created_at: number;
 }
 
@@ -25,8 +26,48 @@ export interface Investment {
   created_at: number;
 }
 
+export const ASSET_TYPES = [
+  "Real Estate",
+  "Fixed Deposit",
+  "Gold",
+  "Bonds",
+  "Savings Account",
+  "Crypto",
+  "Pension",
+  "Other",
+] as const;
+export type AssetType = (typeof ASSET_TYPES)[number];
+
+export const ASSET_TYPE_ICONS: Record<string, string> = {
+  "Real Estate": "🏠",
+  "Fixed Deposit": "🏦",
+  "Gold": "🥇",
+  "Bonds": "📊",
+  "Savings Account": "💰",
+  "Crypto": "₿",
+  "Pension": "🧓",
+  "Other": "💼",
+};
+
+export interface Asset {
+  id: string;
+  name: string;
+  type: string;
+  value: number;
+  currency: string;
+  notes: string;
+  created_at: number;
+}
+
 export interface MonthlyCashflow {
   month: string;
+  credits: number;
+  debits: number;
+}
+
+export interface MonthlyCashflowByCurrency {
+  month: string;
+  currency: string;
   credits: number;
   debits: number;
 }
@@ -55,6 +96,7 @@ export function categorize(merchant: string): string {
 
 const AS_TX_KEY = "vault_transactions";
 const AS_INV_KEY = "vault_investments";
+const AS_ASSETS_KEY = "vault_assets";
 const AS_SETTINGS_KEY = "vault_settings";
 
 async function asGetAll<T>(key: string): Promise<T[]> {
@@ -70,7 +112,6 @@ async function asSetAll<T>(key: string, items: T[]): Promise<void> {
 
 type SQLiteDb = import("expo-sqlite").SQLiteDatabase;
 
-// Single promise so SQLite is only opened once; resolves to null if unavailable
 const _dbPromise: Promise<SQLiteDb | null> =
   Platform.OS === "web"
     ? Promise.resolve(null)
@@ -81,7 +122,7 @@ const _dbPromise: Promise<SQLiteDb | null> =
           await initSchema(db);
           return db;
         } catch {
-          return null; // Expo Go or restricted environment — fall back to AsyncStorage
+          return null;
         }
       })();
 
@@ -114,14 +155,25 @@ async function initSchema(db: SQLiteDb) {
       currency TEXT NOT NULL DEFAULT 'USD',
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS assets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'Other',
+      value REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'GBP',
+      notes TEXT DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `);
+  // Migrations — fail silently if column already exists
+  try { await db.runAsync("ALTER TABLE transactions ADD COLUMN currency TEXT DEFAULT 'GBP'"); } catch { /* already exists */ }
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Transactions ─────────────────────────────────────────────────────────────
 
 export async function insertTransactions(
   txs: Array<{
@@ -133,7 +185,9 @@ export async function insertTransactions(
     type: string;
     category?: string;
     source_type?: string;
-  }>
+    currency?: string;
+  }>,
+  defaultCurrency = "GBP"
 ): Promise<number> {
   const db = await getDb();
 
@@ -149,6 +203,7 @@ export async function insertTransactions(
       type: tx.type as "credit" | "debit",
       category: tx.category ?? categorize(tx.merchant),
       source_type: tx.source_type ?? "Statement",
+      currency: tx.currency ?? defaultCurrency,
       created_at: Date.now(),
     }));
     await asSetAll(AS_TX_KEY, [...existing, ...next]);
@@ -159,13 +214,15 @@ export async function insertTransactions(
   await db.withTransactionAsync(async () => {
     for (const tx of txs) {
       await db.runAsync(
-        `INSERT INTO transactions (id, account_id, date, description, merchant, amount, type, category, source_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO transactions (id, account_id, date, description, merchant, amount, type, category, source_type, currency, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           genId(), tx.account_id ?? null, tx.date, tx.description,
           tx.merchant, tx.amount, tx.type,
           tx.category ?? categorize(tx.merchant),
-          tx.source_type ?? "Statement", Date.now(),
+          tx.source_type ?? "Statement",
+          tx.currency ?? defaultCurrency,
+          Date.now(),
         ]
       );
       inserted++;
@@ -227,6 +284,35 @@ export async function getMonthlyCashflow(): Promise<MonthlyCashflow[]> {
   );
 }
 
+export async function getMonthlyCashflowByCurrency(): Promise<MonthlyCashflowByCurrency[]> {
+  const db = await getDb();
+  if (!db) {
+    const all = await asGetAll<Transaction>(AS_TX_KEY);
+    const byKey: Record<string, { credits: number; debits: number }> = {};
+    for (const tx of all) {
+      const month = tx.date.substring(0, 7);
+      const cur = tx.currency ?? "GBP";
+      const key = `${month}|${cur}`;
+      if (!byKey[key]) byKey[key] = { credits: 0, debits: 0 };
+      if (tx.type === "credit") byKey[key].credits += tx.amount;
+      else byKey[key].debits += tx.amount;
+    }
+    return Object.entries(byKey)
+      .map(([key, v]) => {
+        const [month, currency] = key.split("|");
+        return { month, currency, credits: +v.credits.toFixed(2), debits: +v.debits.toFixed(2) };
+      })
+      .sort((a, b) => b.month.localeCompare(a.month));
+  }
+  return db.getAllAsync<MonthlyCashflowByCurrency>(
+    `SELECT strftime('%Y-%m', date) as month,
+      COALESCE(currency, 'GBP') as currency,
+      ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE 0 END),2) as credits,
+      ROUND(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END),2) as debits
+     FROM transactions GROUP BY month, currency ORDER BY month DESC`
+  );
+}
+
 export async function getTotals(): Promise<{ totalCredits: number; totalDebits: number; balance: number }> {
   const db = await getDb();
   if (!db) {
@@ -247,6 +333,30 @@ export async function getTotals(): Promise<{ totalCredits: number; totalDebits: 
   return { totalCredits: c, totalDebits: d, balance: +(c - d).toFixed(2) };
 }
 
+export async function getTotalsByCurrency(): Promise<Record<string, { credits: number; debits: number }>> {
+  const db = await getDb();
+  if (!db) {
+    const all = await asGetAll<Transaction>(AS_TX_KEY);
+    const result: Record<string, { credits: number; debits: number }> = {};
+    for (const tx of all) {
+      const cur = tx.currency ?? "GBP";
+      if (!result[cur]) result[cur] = { credits: 0, debits: 0 };
+      if (tx.type === "credit") result[cur].credits += tx.amount;
+      else result[cur].debits += tx.amount;
+    }
+    return result;
+  }
+  const rows = await db.getAllAsync<{ currency: string; credits: number; debits: number }>(
+    `SELECT COALESCE(currency, 'GBP') as currency,
+      ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE 0 END),2) as credits,
+      ROUND(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END),2) as debits
+     FROM transactions GROUP BY currency`
+  );
+  return Object.fromEntries(rows.map((r) => [r.currency, { credits: r.credits, debits: r.debits }]));
+}
+
+// ─── Investments ──────────────────────────────────────────────────────────────
+
 export async function getInvestments(): Promise<Investment[]> {
   const db = await getDb();
   if (!db) return asGetAll<Investment>(AS_INV_KEY);
@@ -265,6 +375,31 @@ export async function insertInvestment(inv: Omit<Investment, "id" | "created_at"
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [genId(), inv.broker_name, inv.source_type, inv.ticker, inv.shares, inv.avg_price, inv.currency, Date.now()]
   );
+}
+
+export async function updateInvestment(
+  id: string,
+  shares: number,
+  avg_price: number,
+  currency?: string
+): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    const all = await asGetAll<Investment>(AS_INV_KEY);
+    const updated = all.map((inv) =>
+      inv.id === id ? { ...inv, shares, avg_price, ...(currency ? { currency } : {}) } : inv
+    );
+    await asSetAll(AS_INV_KEY, updated);
+    return;
+  }
+  if (currency) {
+    await db.runAsync(
+      "UPDATE investments SET shares = ?, avg_price = ?, currency = ? WHERE id = ?",
+      [shares, avg_price, currency, id]
+    );
+  } else {
+    await db.runAsync("UPDATE investments SET shares = ?, avg_price = ? WHERE id = ?", [shares, avg_price, id]);
+  }
 }
 
 export async function deleteInvestment(id: string): Promise<void> {
@@ -287,6 +422,52 @@ export async function deleteInvestmentsByBroker(brokerName: string): Promise<voi
   await db.runAsync("DELETE FROM investments WHERE broker_name = ? AND source_type = 'Statement'", [brokerName]);
 }
 
+// ─── Manual Assets ────────────────────────────────────────────────────────────
+
+export async function getAssets(): Promise<Asset[]> {
+  const db = await getDb();
+  if (!db) return asGetAll<Asset>(AS_ASSETS_KEY);
+  return db.getAllAsync<Asset>("SELECT * FROM assets ORDER BY type, name");
+}
+
+export async function insertAsset(asset: Omit<Asset, "id" | "created_at">): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    const existing = await asGetAll<Asset>(AS_ASSETS_KEY);
+    await asSetAll(AS_ASSETS_KEY, [...existing, { ...asset, id: genId(), created_at: Date.now() }]);
+    return;
+  }
+  await db.runAsync(
+    `INSERT INTO assets (id, name, type, value, currency, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [genId(), asset.name, asset.type, asset.value, asset.currency, asset.notes ?? "", Date.now()]
+  );
+}
+
+export async function updateAsset(id: string, updates: Partial<Omit<Asset, "id" | "created_at">>): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    const existing = await asGetAll<Asset>(AS_ASSETS_KEY);
+    await asSetAll(AS_ASSETS_KEY, existing.map((a) => (a.id === id ? { ...a, ...updates } : a)));
+    return;
+  }
+  const keys = Object.keys(updates);
+  const vals = Object.values(updates);
+  const fields = keys.map((k) => `${k} = ?`).join(", ");
+  await db.runAsync(`UPDATE assets SET ${fields} WHERE id = ?`, [...vals, id]);
+}
+
+export async function deleteAsset(id: string): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    const existing = await asGetAll<Asset>(AS_ASSETS_KEY);
+    await asSetAll(AS_ASSETS_KEY, existing.filter((a) => a.id !== id));
+    return;
+  }
+  await db.runAsync("DELETE FROM assets WHERE id = ?", [id]);
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
 export async function getSetting(key: string, fallback = ""): Promise<string> {
   const db = await getDb();
   if (!db) {
@@ -305,6 +486,8 @@ export async function setSetting(key: string, value: string): Promise<void> {
   }
   await db.runAsync("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, value]);
 }
+
+// ─── Categories ───────────────────────────────────────────────────────────────
 
 export interface CategoryTotal {
   category: string;
@@ -350,7 +533,7 @@ export async function updateTransactionCategory(id: string, category: string): P
   await db.runAsync("UPDATE transactions SET category = ? WHERE id = ?", [category, id]);
 }
 
-// ─── Budgets (stored as settings budget_<category>) ──────────────────────────
+// ─── Budgets ──────────────────────────────────────────────────────────────────
 
 export async function getBudgets(): Promise<Record<string, number>> {
   const prefix = "budget_";
@@ -375,31 +558,6 @@ export async function getBudgets(): Promise<Record<string, number>> {
     result[cat] = parseFloat(row.value);
   }
   return result;
-}
-
-export async function updateInvestment(
-  id: string,
-  shares: number,
-  avg_price: number,
-  currency?: string
-): Promise<void> {
-  const db = await getDb();
-  if (!db) {
-    const all = await asGetAll<Investment>(AS_INV_KEY);
-    const updated = all.map((inv) =>
-      inv.id === id ? { ...inv, shares, avg_price, ...(currency ? { currency } : {}) } : inv
-    );
-    await asSetAll(AS_INV_KEY, updated);
-    return;
-  }
-  if (currency) {
-    await db.runAsync(
-      "UPDATE investments SET shares = ?, avg_price = ?, currency = ? WHERE id = ?",
-      [shares, avg_price, currency, id]
-    );
-  } else {
-    await db.runAsync("UPDATE investments SET shares = ?, avg_price = ? WHERE id = ?", [shares, avg_price, id]);
-  }
 }
 
 export async function setBudget(category: string, limit: number): Promise<void> {

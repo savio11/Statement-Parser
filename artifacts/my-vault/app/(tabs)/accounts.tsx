@@ -30,6 +30,7 @@ import {
   updateTransactionCategory,
   type Transaction,
 } from "@/lib/database";
+import { CURRENCIES, getCurrencySymbol } from "@/lib/currency";
 import {
   cancelReminder,
   getReminderSettings,
@@ -177,6 +178,7 @@ export default function AccountsScreen() {
   const currentMonth = new Date().toISOString().substring(0, 7);
   const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set([currentMonth]));
   const [recatTx, setRecatTx] = useState<Transaction | null>(null);
+  const [importCurrency, setImportCurrency] = useState("GBP");
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderDay, setReminderDay] = useState(1);
   const [showDayPicker, setShowDayPicker] = useState(false);
@@ -275,7 +277,7 @@ export default function AccountsScreen() {
     const beforeTxs = await getTransactions(2000);
     const beforeSubs = new Set(detectSubscriptions(beforeTxs).map((s) => s.normalizedKey));
 
-    await insertTransactions(previewTxs);
+    await insertTransactions(previewTxs, importCurrency);
 
     const afterTxs = await getTransactions(2000);
     const afterSubs = detectSubscriptions(afterTxs);
@@ -584,8 +586,33 @@ export default function AccountsScreen() {
             Import {previewTxs.length} Transactions
           </Text>
           <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
-            Review parsed transactions before saving
+            Review and confirm the statement currency before saving
           </Text>
+
+          {/* Currency picker */}
+          <View style={{ paddingHorizontal: 20, marginBottom: 12 }}>
+            <Text style={[styles.currencyPickerLabel, { color: colors.mutedForeground }]}>
+              Statement currency
+            </Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 6 }}>
+              {CURRENCIES.map((c) => (
+                <TouchableOpacity
+                  key={c}
+                  onPress={() => setImportCurrency(c)}
+                  style={[
+                    styles.currencyChip,
+                    { borderColor: importCurrency === c ? colors.primary : colors.border },
+                    importCurrency === c && { backgroundColor: colors.primary },
+                  ]}
+                >
+                  <Text style={[styles.currencyChipText, { color: importCurrency === c ? colors.background : colors.mutedForeground }]}>
+                    {c}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+
           <FlatList
             data={previewTxs.slice(0, 50)}
             keyExtractor={(_, i) => i.toString()}
@@ -604,6 +631,7 @@ export default function AccountsScreen() {
                       category: item.category,
                       date: item.date,
                       source_type: "Statement",
+                      currency: importCurrency,
                       created_at: 0,
                     }}
                   />
@@ -778,6 +806,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_400Regular",
     textAlign: "center",
+  },
+  currencyPickerLabel: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+    marginBottom: 2,
+  },
+  currencyChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 20,
+    borderWidth: 1,
+    marginRight: 6,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  currencyChipText: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
   },
   divider: {
     height: StyleSheet.hairlineWidth,
