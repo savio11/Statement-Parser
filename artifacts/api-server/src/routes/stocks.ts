@@ -29,10 +29,17 @@ router.get("/stocks/price/:ticker", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Price unavailable" });
       return;
     }
+    // GBp / GBX = pence → convert to GBP pounds
+    let price: number = meta.regularMarketPrice;
+    let currency: string = meta.currency ?? "USD";
+    if (currency === "GBp" || currency === "GBX") {
+      price = price / 100;
+      currency = "GBP";
+    }
     res.json({
       ticker: meta.symbol,
-      price: meta.regularMarketPrice,
-      currency: meta.currency,
+      price,
+      currency,
       exchange: meta.fullExchangeName,
       name: meta.shortName ?? meta.symbol,
     });
@@ -70,6 +77,30 @@ router.get("/stocks/search", async (req: Request, res: Response) => {
     res.json({ results });
   } catch {
     res.json({ results: [] });
+  }
+});
+
+router.get("/stocks/fx", async (req: Request, res: Response) => {
+  const from = ((req.query.from as string) ?? "").toUpperCase();
+  const to = ((req.query.to as string) ?? "GBP").toUpperCase();
+  if (!from || !/^[A-Z]{3}$/.test(from) || !/^[A-Z]{3}$/.test(to)) {
+    res.status(400).json({ error: "Invalid currency code" });
+    return;
+  }
+  if (from === to) { res.json({ rate: 1 }); return; }
+  try {
+    const r = await fetch(
+      `https://api.frankfurter.app/latest?from=${from}&to=${to}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (!r.ok) { res.status(502).json({ error: "FX fetch failed" }); return; }
+    const data = await r.json() as { rates?: Record<string, number> };
+    const rate = data?.rates?.[to];
+    if (!rate) { res.status(502).json({ error: "Rate not found" }); return; }
+    res.set("Cache-Control", "public, max-age=300");
+    res.json({ rate });
+  } catch {
+    res.status(502).json({ error: "FX fetch error" });
   }
 });
 

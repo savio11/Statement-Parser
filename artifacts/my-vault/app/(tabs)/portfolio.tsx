@@ -84,10 +84,10 @@ async function searchStocksViaProxy(query: string): Promise<StockResult[]> {
 async function fetchExchangeRate(from: string, to: string): Promise<number> {
   if (from === to) return 1;
   try {
-    const res = await fetch(`https://api.frankfurter.app/latest?from=${from}&to=${to}`);
+    const res = await fetch(`${BASE}/api/stocks/fx?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
     if (!res.ok) return 1;
     const data = await res.json();
-    return data?.rates?.[to] ?? 1;
+    return data?.rate ?? 1;
   } catch {
     return 1;
   }
@@ -153,14 +153,22 @@ export default function PortfolioScreen() {
     }
 
     const tickers = [...new Set(invs.map((i) => i.ticker))];
-    const currencies = [...new Set(invs.map((i) => i.currency))];
 
-    const [priceResults, rateResults] = await Promise.all([
-      Promise.all(tickers.map((t) => fetchPriceViaProxy(t).then((r) => [t, r] as [string, { price: number; currency: string } | null]))),
-      Promise.all(currencies.map((c) => fetchExchangeRate(c, hc).then((r) => [c, r] as [string, number]))),
-    ]);
-
+    // Fetch live prices first so we know what currencies Yahoo Finance uses
+    const priceResults = await Promise.all(
+      tickers.map((t) => fetchPriceViaProxy(t).then((r) => [t, r] as [string, { price: number; currency: string } | null]))
+    );
     const priceMap = Object.fromEntries(priceResults);
+
+    // Collect all currencies needed: stored (for cost basis) + live price (for MV)
+    const allCurrencies = [...new Set([
+      ...invs.map((i) => i.currency),
+      ...priceResults.map(([, r]) => r?.currency).filter((c): c is string => !!c),
+    ])];
+
+    const rateResults = await Promise.all(
+      allCurrencies.map((c) => fetchExchangeRate(c, hc).then((r) => [c, r] as [string, number]))
+    );
     const rateMap = Object.fromEntries(rateResults);
 
     let tv = 0, tc = 0;
@@ -168,13 +176,18 @@ export default function PortfolioScreen() {
     const enriched: HoldingWithPrice[] = invs.map((inv) => {
       const priceInfo = priceMap[inv.ticker] ?? null;
       const currentPrice = priceInfo?.price ?? null;
-      const rate = rateMap[inv.currency] ?? 1;
+      // Use Yahoo Finance's live price currency for MV conversion (always correct),
+      // fall back to stored currency if price unavailable
+      const priceCurrency = priceInfo?.currency ?? inv.currency;
+      const costRate = rateMap[inv.currency] ?? 1;
+      const priceRate = rateMap[priceCurrency] ?? 1;
       const cost = inv.shares * inv.avg_price;
-      tc += cost * rate;
+      tc += cost * costRate;
       if (currentPrice !== null) {
         const mv = inv.shares * currentPrice;
-        const mvHome = mv * rate;
+        const mvHome = mv * priceRate;
         tv += mvHome;
+        const costHome = cost * costRate;
         return {
           ...inv,
           currentPrice,
