@@ -20,17 +20,136 @@ interface ParsedTransaction {
 
 function categorize(merchant: string): string {
   const m = merchant.toLowerCase();
-  if (/mcdonalds|kfc|subway|pizza|burger|restaurant|cafe|starbucks|costa|tesco|asda|sainsbury|lidl|aldi|waitrose|morrisons|takeaway|sushi|indian|chinese|thai|hasty|lahori|mowgli|taj mahal|streate|botanic/.test(m)) return "Food & Dining";
-  if (/uber|lyft|trainline|rail|tube|lul\s|tfl|arriva|bus|taxi|transport|parking|petrol|fuel|shell|railcard|ticket machine/.test(m)) return "Transport";
-  if (/netflix|spotify|disney|sky\s|nowtv|twitch|youtube|hbo|apple tv|manchester united|mufc|ticketing/.test(m)) return "Entertainment";
-  if (/amazon|ebay|asos|zara|h&m|primark|jd sports|sports direct|next|argos|currys|john lewis|ikea|shopping|fashion/.test(m)) return "Shopping";
-  if (/electricity|gas|water|sse|british gas|e\.on|edf|thames|severn|vodafone|o2|ee\s|three\s|talktalk|broadband|internet/.test(m)) return "Bills & Utilities";
+  if (/mcdonalds|kfc|subway|pizza|burger|restaurant|cafe|starbucks|costa|tesco|asda|sainsbury|lidl|aldi|waitrose|morrisons|takeaway|sushi|indian|chinese|thai|hasty|lahori|mowgli|taj mahal|streate|botanic|nandos|tortilla|deliveroo|just eat|uber eats|pret|greggs|wasabi|caffe|coffee|donut|moes peri|haute dolci|kitchen pizzeria|ifly|b518_bar/.test(m)) return "Food & Dining";
+  if (/uber|lyft|trainline|rail|tube|lul\s|tfl|arriva|bus|taxi|transport|parking|petrol|fuel|shell|railcard|ticket machine|thetrainline|3cpayment\*pret/.test(m)) return "Transport";
+  if (/netflix|spotify|disney|sky\s|nowtv|twitch|youtube|hbo|apple tv|manchester united|mufc|ticketing|membership/.test(m)) return "Entertainment";
+  if (/amazon|amznmktplace|ebay|asos|zara|h&m|primark|jd sports|sports direct|next|argos|currys|john lewis|ikea|shopping|fashion|viva\*flying|marks and spencer|boots the chemist|co-op|the cooperative/.test(m)) return "Shopping";
+  if (/electricity|gas|water|sse|british gas|e\.on|edf|thames|severn|vodafone|o2|ee\s|three\s|talktalk|broadband|internet|trip\.com|trip_uk/.test(m)) return "Bills & Utilities";
   if (/rent|mortgage|letting|estate agent|benham|reeves/.test(m)) return "Housing";
   if (/gym|fitness|sport|running|yoga|pilates|swimming/.test(m)) return "Health & Fitness";
-  if (/holiday|hotel|airbnb|booking|expedia|flight|easyjet|ryanair|british airways|hilton|marriott|aloft|trip_uk/.test(m)) return "Travel";
+  if (/holiday|hotel|airbnb|booking|expedia|flight|easyjet|ryanair|british airways|hilton|marriott|aloft/.test(m)) return "Travel";
   if (/salary|payroll|wage|income|facebook|google|employer/.test(m)) return "Income";
-  if (/transfer|payment|revolut|monzo|paypal|cash app|wise|splitwise/.test(m)) return "Transfers";
+  if (/payment received|transfer|revolut|monzo|paypal|cash app|wise|splitwise|refund|cashback/.test(m)) return "Transfers";
   return "Other";
+}
+
+// ─── Amex-style PDF parser ────────────────────────────────────────────────────
+// American Express statements extract text in a column-first order:
+//   1. CR marker(s) appear before transaction lines (for credit rows)
+//   2. All transaction date+merchant lines follow in order
+//   3. Transaction amounts appear as a separate standalone block after all merchants
+// Strategy: per page-segment, collect merchants and amounts separately, then zip.
+
+function parseAmexPDF(text: string): ParsedTransaction[] {
+  const results: ParsedTransaction[] = [];
+
+  // Extract year from "From 6 April to 5 May 2024" or "From December to January 2024"
+  const periodMatch = text.match(/From\s+\d+\s+\w+\s+to\s+\d+\s+\w+\s+(\d{4})/i);
+  const stmtEndYear = periodMatch ? parseInt(periodMatch[1]) : new Date().getFullYear();
+
+  // Also extract end month to handle cross-year statements
+  const endMonthMatch = text.match(/From\s+\d+\s+\w+\s+to\s+\d+\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i);
+  const endMonth = endMonthMatch ? MONTHS[endMonthMatch[1].toLowerCase()] : "12";
+
+  // Amex transaction line: "Apr 8  Apr 8  MERCHANT DETAILS" (two month-day pairs then merchant)
+  const txLineRe = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(.+)/i;
+
+  // Standalone amount: "4.80" or "129.99" — no thousands for tx amounts; up to 5 digits before decimal
+  const standaloneAmtRe = /^(\d{1,4}\.\d{2})$/;
+
+  // Lines that are definitely boilerplate to skip
+  const boilerplateRe = /^(Page \d|Prepared for|Statement of Account|American Express|Account Summary|Credit Summary|Rates of Interest|For more information|How you can pay|Previous Closing|Next Cardmembership|If you do not|In these unprecedented|To switch|Estimated Interest|Please send|Your next annual|You must pay|If you are unable|All transactions are subject|Direct Debit|Debit Card|Internet Banking|CHAPS payment|International payment|Please Note|For enquiries|Membership Rewards|Conversion rate|Preferred Rewards Gold|Period \d|Card Type|Card Number|Points|Total Points|Maximum \d|We won't|We'll charge|You can update|You can manage|The information contained|Compound|Annual Rate|Simple|Monthly Rate|Goods And Services|Cash Advance|Balance Transfer|Customer Service|amercanexpress|americanexpress|global\.american|https?:\/\/|> Online|> By Telephone|> Or by post|Membership Number|Statement includes|Minimum Repayment|Payment Due Date)/i;
+
+  // Category label noise lines (appear between transactions and amounts)
+  const noiseLabelRe = /^(GOODS|MERCHANDISE|THE COOPERATIVE|DeliverooGoldBenefit|A|W Waterloo Station|Popeyes Louisiana Kitchen.*|Other Account Holder Charges)$/i;
+
+  interface PageSeg {
+    transactions: Array<{ month: string; day: string; merchant: string }>;
+    amounts: number[];
+    crBeforeCount: number;   // CR markers seen before first transaction
+    otherAcctStart: number;  // index in amounts where "OTHER ACCOUNT TRANSACTIONS" begins
+  }
+
+  const segs: PageSeg[] = [];
+  let seg: PageSeg = { transactions: [], amounts: [], crBeforeCount: 0, otherAcctStart: -1 };
+  let txStarted = false;
+  let inOtherAcct = false;
+
+  const pushSeg = () => {
+    if (seg.transactions.length > 0) segs.push(seg);
+    seg = { transactions: [], amounts: [], crBeforeCount: 0, otherAcctStart: -1 };
+    txStarted = false;
+    inOtherAcct = false;
+  };
+
+  for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    if (/^--\s*\d+\s+of\s+\d+\s*--$/.test(line)) { pushSeg(); continue; }
+    if (boilerplateRe.test(line)) continue;
+    if (noiseLabelRe.test(line)) continue;
+    // Skip large summary amounts like "1,490.46" or "12,000.00" (contain comma)
+    if (/^[\d,]+\.\d{2}$/.test(line) && line.includes(",")) continue;
+    // Skip date-only lines like "07/01/2025"
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(line)) continue;
+    // Skip lines that are pure integers (points balances)
+    if (/^\d{4,}$/.test(line)) continue;
+
+    if (line === "CR") {
+      if (!txStarted) seg.crBeforeCount++;
+      continue;
+    }
+
+    if (/^OTHER ACCOUNT TRANSACTIONS$/i.test(line)) {
+      inOtherAcct = true;
+      seg.otherAcctStart = seg.amounts.length;
+      continue;
+    }
+
+    if (/^Total new spend|^Total of other/i.test(line)) continue;
+
+    const txMatch = line.match(txLineRe);
+    if (txMatch) {
+      txStarted = true;
+      inOtherAcct = false;
+      seg.transactions.push({ month: txMatch[1], day: txMatch[2], merchant: txMatch[3].trim() });
+      continue;
+    }
+
+    const amtMatch = line.match(standaloneAmtRe);
+    if (amtMatch && txStarted) {
+      seg.amounts.push(parseFloat(amtMatch[1]));
+      continue;
+    }
+  }
+  pushSeg();
+
+  for (const s of segs) {
+    const count = Math.min(s.transactions.length, s.amounts.length);
+    for (let i = 0; i < count; i++) {
+      const { month, day, merchant } = s.transactions[i];
+      const amount = s.amounts[i];
+
+      // Determine year: if transaction month > endMonth by more than 6 months, use prev year
+      const txMonthNum = parseInt(MONTHS[month.toLowerCase()]);
+      const endMonthNum = parseInt(endMonth);
+      const year = txMonthNum - endMonthNum > 6 ? stmtEndYear - 1 : stmtEndYear;
+      const date = `${year}-${MONTHS[month.toLowerCase()]}-${day.padStart(2, "0")}`;
+
+      // Credit if: keyword match, OR in "other account" credit section, OR one of first N CRs
+      const isOtherAcctCredit = s.otherAcctStart >= 0 && i >= s.otherAcctStart;
+      const isKeywordCredit = /payment received|refund|cashback|gold benefit|credit note/i.test(merchant);
+      const isCRCredit = i < s.crBeforeCount;
+      const type: "credit" | "debit" = isKeywordCredit || isOtherAcctCredit || isCRCredit ? "credit" : "debit";
+
+      results.push({
+        date, description: merchant, merchant,
+        amount: parseFloat(amount.toFixed(2)),
+        type,
+        category: categorize(merchant),
+      });
+    }
+  }
+
+  return results;
 }
 
 // ─── HSBC-style PDF parser ────────────────────────────────────────────────────
@@ -258,8 +377,9 @@ router.post("/parse-pdf", async (req: Request, res: Response) => {
     const { PDFParse } = (globalThis as any).require("pdf-parse") as { PDFParse: new (opts: { data: Buffer }) => { getText(): Promise<{ text: string; total: number }> } };
     const parser = new PDFParse({ data: buffer });
     const parsed = await parser.getText();
-    const transactions = parsePDFText(parsed.text);
-    res.json({ transactions, pageCount: parsed.total });
+    const isAmex = /american express/i.test(parsed.text);
+    const transactions = isAmex ? parseAmexPDF(parsed.text) : parsePDFText(parsed.text);
+    res.json({ transactions, pageCount: parsed.total, bank: isAmex ? "amex" : "hsbc" });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Parse error";
     req.log?.error({ err: e }, "PDF parse error");
