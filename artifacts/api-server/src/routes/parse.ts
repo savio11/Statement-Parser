@@ -253,10 +253,13 @@ router.post("/parse-pdf", async (req: Request, res: Response) => {
     }
 
     const buffer = Buffer.from(body.base64, "base64");
-    const pdfParse = (await import("pdf-parse")).default;
-    const parsed = await pdfParse(buffer);
+    // pdf-parse v2 uses a class-based API: new PDFParse({ data }) + .getText()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { PDFParse } = (globalThis as any).require("pdf-parse") as { PDFParse: new (opts: { data: Buffer }) => { getText(): Promise<{ text: string; total: number }> } };
+    const parser = new PDFParse({ data: buffer });
+    const parsed = await parser.getText();
     const transactions = parsePDFText(parsed.text);
-    res.json({ transactions, pageCount: parsed.numpages });
+    res.json({ transactions, pageCount: parsed.total });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Parse error";
     req.log?.error({ err: e }, "PDF parse error");
