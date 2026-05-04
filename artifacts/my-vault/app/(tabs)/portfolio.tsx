@@ -23,6 +23,7 @@ import {
   getSetting,
   insertInvestment,
   setSetting,
+  updateInvestment,
   type Investment,
 } from "@/lib/database";
 import { useColors } from "@/hooks/useColors";
@@ -91,6 +92,10 @@ export default function PortfolioScreen() {
   const [totalValue, setTotalValue] = useState(0);
   const [totalCost, setTotalCost] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
+  const [editingHolding, setEditingHolding] = useState<HoldingWithPrice | null>(null);
+  const [editShares, setEditShares] = useState("");
+  const [editPrice, setEditPrice] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   // Form state
   const [searchQuery, setSearchQuery] = useState("");
@@ -161,6 +166,7 @@ export default function PortfolioScreen() {
     setTotalValue(tv);
     setTotalCost(tc);
     setLoading(false);
+    setSetting("portfolio_total_value", tv.toFixed(2)).catch(() => {});
   }, []);
 
   useEffect(() => { loadAndPrice(); }, [loadAndPrice]);
@@ -262,6 +268,32 @@ export default function PortfolioScreen() {
     await loadAndPrice();
   }
 
+  function openEdit(h: HoldingWithPrice) {
+    setEditingHolding(h);
+    setEditShares(h.shares.toString());
+    setEditPrice(h.avg_price.toFixed(2));
+  }
+
+  async function saveEdit() {
+    if (!editingHolding) return;
+    const sharesNum = parseFloat(editShares);
+    const priceNum = parseFloat(editPrice);
+    if (isNaN(sharesNum) || sharesNum <= 0) {
+      Alert.alert("Invalid shares", "Please enter a valid number of shares.");
+      return;
+    }
+    if (isNaN(priceNum) || priceNum <= 0) {
+      Alert.alert("Invalid price", "Please enter a valid price.");
+      return;
+    }
+    setEditSaving(true);
+    await updateInvestment(editingHolding.id, sharesNum, priceNum);
+    setEditSaving(false);
+    setEditingHolding(null);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    await loadAndPrice();
+  }
+
   async function removeHolding(id: string) {
     Alert.alert("Remove holding", "Delete this investment?", [
       { text: "Cancel", style: "cancel" },
@@ -270,6 +302,7 @@ export default function PortfolioScreen() {
         style: "destructive",
         onPress: async () => {
           await deleteInvestment(id);
+          setEditingHolding(null);
           if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           await loadAndPrice();
         },
@@ -372,14 +405,14 @@ export default function PortfolioScreen() {
               const isUp = (h.pnl ?? 0) >= 0;
               return (
                 <View key={h.id}>
-                  <TouchableOpacity style={styles.holdingRow} onLongPress={() => removeHolding(h.id)} activeOpacity={0.8}>
+                  <View style={styles.holdingRow}>
                     <View style={[styles.tickerBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
                       <Text style={[styles.tickerText, { color: colors.primary }]}>{h.ticker}</Text>
                     </View>
                     <View style={styles.holdingMiddle}>
                       <Text style={[styles.holdingBroker, { color: colors.foreground }]}>{h.broker_name}</Text>
                       <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>
-                        {h.shares} shares · {h.currency}
+                        {h.shares} sh · {h.currency}
                         {h.currentPrice !== null ? ` · @${h.currentPrice.toFixed(2)}` : ""}
                       </Text>
                     </View>
@@ -398,7 +431,10 @@ export default function PortfolioScreen() {
                         <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>No price</Text>
                       )}
                     </View>
-                  </TouchableOpacity>
+                    <TouchableOpacity onPress={() => openEdit(h)} style={styles.editBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Feather name="edit-2" size={14} color={colors.mutedForeground} />
+                    </TouchableOpacity>
+                  </View>
                   {i < holdings.length - 1 && <View style={[styles.divider, { backgroundColor: colors.border }]} />}
                 </View>
               );
@@ -407,9 +443,75 @@ export default function PortfolioScreen() {
         </GlassCard>
 
         <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-          Long-press a holding to remove · Prices via Yahoo Finance
+          Tap ✏️ to edit · Prices via Yahoo Finance
         </Text>
       </ScrollView>
+
+      {/* ── Edit holding modal ── */}
+      <Modal visible={!!editingHolding} animationType="slide" transparent presentationStyle="pageSheet">
+        <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
+          <View style={styles.modalHandle} />
+          <Text style={[styles.modalTitle, { color: colors.foreground }]}>
+            Edit {editingHolding?.ticker}
+          </Text>
+          <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+            {editingHolding?.broker_name} · {editingHolding?.currency}
+            {editingHolding?.currentPrice != null ? ` · Live @${editingHolding.currentPrice.toFixed(2)}` : ""}
+          </Text>
+
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Number of Shares</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. 10.5"
+              placeholderTextColor={colors.mutedForeground}
+              value={editShares}
+              onChangeText={setEditShares}
+              keyboardType="decimal-pad"
+              autoFocus
+            />
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Cost Price per Share</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. 150.00"
+              placeholderTextColor={colors.mutedForeground}
+              value={editPrice}
+              onChangeText={setEditPrice}
+              keyboardType="decimal-pad"
+            />
+          </View>
+
+          <View style={[styles.modalActions, { paddingBottom: insets.bottom + 20 }]}>
+            <TouchableOpacity
+              style={[styles.modalBtn, { borderWidth: 1, borderRadius: 12, borderColor: "#EF4444", flex: 1 }]}
+              onPress={() => editingHolding && removeHolding(editingHolding.id)}
+            >
+              <Feather name="trash-2" size={14} color="#EF4444" />
+              <Text style={{ color: "#EF4444", fontFamily: "Inter_500Medium", marginLeft: 4 }}>Delete</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
+              onPress={() => setEditingHolding(null)}
+            >
+              <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.confirmBtn, { backgroundColor: colors.primary, opacity: editSaving ? 0.7 : 1 }]}
+              onPress={saveEdit}
+              disabled={editSaving}
+            >
+              {editSaving ? (
+                <ActivityIndicator color={colors.background} size="small" />
+              ) : (
+                <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>Save</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* ── Add holding modal ── */}
       <Modal visible={showAdd} animationType="slide" transparent presentationStyle="pageSheet">
@@ -571,6 +673,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   iconBtn: { padding: 8 },
+  editBtn: { padding: 8, marginLeft: 2 },
   addBtn: {
     width: 36,
     height: 36,

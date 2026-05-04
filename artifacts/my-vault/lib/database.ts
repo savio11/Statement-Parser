@@ -368,6 +368,17 @@ export async function getBudgets(): Promise<Record<string, number>> {
   return result;
 }
 
+export async function updateInvestment(id: string, shares: number, avg_price: number): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    const all = await asGetAll<Investment>(AS_INV_KEY);
+    const updated = all.map((inv) => (inv.id === id ? { ...inv, shares, avg_price } : inv));
+    await asSetAll(AS_INV_KEY, updated);
+    return;
+  }
+  await db.runAsync("UPDATE investments SET shares = ?, avg_price = ? WHERE id = ?", [shares, avg_price, id]);
+}
+
 export async function setBudget(category: string, limit: number): Promise<void> {
   await setSetting(`budget_${category}`, limit.toFixed(2));
 }

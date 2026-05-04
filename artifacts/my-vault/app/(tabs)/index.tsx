@@ -28,6 +28,7 @@ import {
   deleteBudget,
   getCategoryBreakdown,
   getMonthlyCashflow,
+  getSetting,
   getThisMonthCategorySpend,
   getTransactions,
   getTotals,
@@ -308,15 +309,17 @@ export default function DashboardScreen() {
   const [monthSpend, setMonthSpend] = useState<Record<string, number>>({});
   const [budgetModalVisible, setBudgetModalVisible] = useState(false);
   const [subscriptions, setSubscriptions] = useState<DetectedSubscription[]>([]);
+  const [portfolioValue, setPortfolioValue] = useState(0);
 
   const load = useCallback(async () => {
-    const [cf, allTx, tot, bk, bg, ms] = await Promise.all([
+    const [cf, allTx, tot, bk, bg, ms, pv] = await Promise.all([
       getMonthlyCashflow(),
       getTransactions(500),
       getTotals(),
       getCategoryBreakdown(),
       getBudgets(),
       getThisMonthCategorySpend(),
+      getSetting("portfolio_total_value", "0"),
     ]);
     setCashflow(cf);
     setRecent(allTx.slice(0, 10));
@@ -325,6 +328,7 @@ export default function DashboardScreen() {
     setBudgets(bg);
     setMonthSpend(ms);
     setSubscriptions(detectSubscriptions(allTx));
+    setPortfolioValue(parseFloat(pv) || 0);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -370,6 +374,26 @@ export default function DashboardScreen() {
       >
         <Text style={[styles.screenTitle, { color: colors.foreground }]}>My Vault</Text>
         <Text style={[styles.screenSub, { color: colors.mutedForeground }]}>Financial overview</Text>
+
+        {/* Net worth card (shown only when portfolio has value) */}
+        {portfolioValue > 0 && (
+          <GlassCard style={{ marginBottom: 10, padding: 16 }}>
+            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>Net Worth</Text>
+            <Text style={[styles.statValue, { color: colors.primary, fontSize: 26, marginBottom: 4 }]}>
+              £{formatAmount(Math.abs(totals.balance) + portfolioValue)}
+            </Text>
+            <View style={{ flexDirection: "row", gap: 14, marginTop: 2 }}>
+              <Text style={{ fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>
+                {"Bank "}
+                <Text style={{ color: colors.foreground }}>£{formatAmount(Math.abs(totals.balance))}</Text>
+              </Text>
+              <Text style={{ fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>
+                {"Portfolio "}
+                <Text style={{ color: colors.credit }}>£{formatAmount(portfolioValue)}</Text>
+              </Text>
+            </View>
+          </GlassCard>
+        )}
 
         {/* Balance cards */}
         <View style={styles.statRow}>
