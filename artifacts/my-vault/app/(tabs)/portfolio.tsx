@@ -1,9 +1,10 @@
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Modal,
   Platform,
   ScrollView,
@@ -34,18 +35,35 @@ interface HoldingWithPrice extends Investment {
   valueInHomeCurrency: number | null;
 }
 
-async function fetchPrice(ticker: string): Promise<number | null> {
+interface StockResult {
+  symbol: string;
+  name: string;
+  exchange: string;
+  type: string;
+}
+
+const BASE = `https://${process.env.EXPO_PUBLIC_DOMAIN ?? "localhost"}`;
+
+async function fetchPriceViaProxy(ticker: string): Promise<{ price: number; currency: string } | null> {
   try {
-    const res = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`,
-      { headers: { "User-Agent": "Mozilla/5.0" } }
-    );
+    const res = await fetch(`${BASE}/api/stocks/price/${encodeURIComponent(ticker)}`);
     if (!res.ok) return null;
     const data = await res.json();
-    const meta = data?.chart?.result?.[0]?.meta;
-    return meta?.regularMarketPrice ?? null;
+    return { price: data.price, currency: data.currency ?? "USD" };
   } catch {
     return null;
+  }
+}
+
+async function searchStocksViaProxy(query: string): Promise<StockResult[]> {
+  if (!query.trim()) return [];
+  try {
+    const res = await fetch(`${BASE}/api/stocks/search?q=${encodeURIComponent(query)}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.results ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -61,7 +79,7 @@ async function fetchExchangeRate(from: string, to: string): Promise<number> {
   }
 }
 
-const CURRENCIES = ["USD", "GBP", "EUR", "CHF", "JPY", "CAD", "AUD"];
+const CURRENCIES = ["GBP", "USD", "EUR", "CHF", "JPY", "CAD", "AUD"];
 
 export default function PortfolioScreen() {
   const colors = useColors();
@@ -74,12 +92,18 @@ export default function PortfolioScreen() {
   const [totalCost, setTotalCost] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
 
-  const [form, setForm] = useState({
-    ticker: "",
-    shares: "",
-    currency: "USD",
-    broker_name: "",
-  });
+  // Form state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<StockResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [selectedCompany, setSelectedCompany] = useState<StockResult | null>(null);
+  const [shares, setShares] = useState("");
+  const [currency, setCurrency] = useState("USD");
+  const [broker, setBroker] = useState("");
+  const [manualPrice, setManualPrice] = useState("");
+  const [needsManualPrice, setNeedsManualPrice] = useState(false);
+
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadAndPrice = useCallback(async () => {
     setLoading(true);
@@ -101,18 +125,19 @@ export default function PortfolioScreen() {
     const tickers = [...new Set(invs.map((i) => i.ticker))];
     const currencies = [...new Set(invs.map((i) => i.currency))];
 
-    const [prices, rates] = await Promise.all([
-      Promise.all(tickers.map((t) => fetchPrice(t).then((p) => [t, p] as [string, number | null]))),
+    const [priceResults, rateResults] = await Promise.all([
+      Promise.all(tickers.map((t) => fetchPriceViaProxy(t).then((r) => [t, r] as [string, { price: number; currency: string } | null]))),
       Promise.all(currencies.map((c) => fetchExchangeRate(c, hc).then((r) => [c, r] as [string, number]))),
     ]);
 
-    const priceMap = Object.fromEntries(prices);
-    const rateMap = Object.fromEntries(rates);
+    const priceMap = Object.fromEntries(priceResults);
+    const rateMap = Object.fromEntries(rateResults);
 
     let tv = 0, tc = 0;
 
     const enriched: HoldingWithPrice[] = invs.map((inv) => {
-      const currentPrice = priceMap[inv.ticker] ?? null;
+      const priceInfo = priceMap[inv.ticker] ?? null;
+      const currentPrice = priceInfo?.price ?? null;
       const rate = rateMap[inv.currency] ?? 1;
       const cost = inv.shares * inv.avg_price;
       tc += cost * rate;
@@ -140,44 +165,97 @@ export default function PortfolioScreen() {
 
   useEffect(() => { loadAndPrice(); }, [loadAndPrice]);
 
-  async function addInvestment() {
-    const ticker = form.ticker.toUpperCase().trim();
-    const shares = parseFloat(form.shares);
-    const broker = form.broker_name.trim() || "Manual";
+  function handleSearchChange(text: string) {
+    setSearchQuery(text);
+    setSelectedCompany(null);
+    setNeedsManualPrice(false);
 
-    if (!ticker || isNaN(shares) || shares <= 0) {
-      Alert.alert("Invalid input", "Please enter a ticker symbol and number of shares.");
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!text.trim()) {
+      setSearchResults([]);
       return;
+    }
+    setSearching(true);
+    searchTimer.current = setTimeout(async () => {
+      const results = await searchStocksViaProxy(text);
+      setSearchResults(results);
+      setSearching(false);
+    }, 350);
+  }
+
+  function selectCompany(result: StockResult) {
+    setSelectedCompany(result);
+    setSearchQuery(result.symbol);
+    setSearchResults([]);
+    // Guess currency from exchange
+    const gbpExchanges = ["LSE", "LON", "London Stock Exchange"];
+    const eurExchanges = ["XETRA", "FRA", "AMS", "PAR", "MIL", "BRU", "LIS"];
+    if (gbpExchanges.some((e) => result.exchange.includes(e))) setCurrency("GBP");
+    else if (eurExchanges.some((e) => result.exchange.includes(e))) setCurrency("EUR");
+    else setCurrency("USD");
+  }
+
+  function resetForm() {
+    setSearchQuery("");
+    setSearchResults([]);
+    setSelectedCompany(null);
+    setShares("");
+    setCurrency("USD");
+    setBroker("");
+    setManualPrice("");
+    setNeedsManualPrice(false);
+  }
+
+  async function addInvestment() {
+    const ticker = searchQuery.toUpperCase().trim();
+    const sharesNum = parseFloat(shares);
+
+    if (!ticker) {
+      Alert.alert("Missing ticker", "Search for a company or enter a ticker symbol.");
+      return;
+    }
+    if (isNaN(sharesNum) || sharesNum <= 0) {
+      Alert.alert("Invalid shares", "Please enter a valid number of shares.");
+      return;
+    }
+
+    let avgPrice: number;
+
+    if (needsManualPrice) {
+      avgPrice = parseFloat(manualPrice);
+      if (isNaN(avgPrice) || avgPrice <= 0) {
+        Alert.alert("Invalid price", "Please enter a valid price.");
+        return;
+      }
+    } else {
+      setAdding(true);
+      const priceInfo = await fetchPriceViaProxy(ticker);
+      if (!priceInfo) {
+        setAdding(false);
+        setNeedsManualPrice(true);
+        Alert.alert(
+          "Price unavailable",
+          `Could not fetch a live price for "${ticker}". Enter the current price manually to proceed.`
+        );
+        return;
+      }
+      avgPrice = priceInfo.price;
+      if (priceInfo.currency && currency === "USD") {
+        setCurrency(priceInfo.currency);
+      }
     }
 
     setAdding(true);
-    let livePrice: number | null = null;
-    try {
-      livePrice = await fetchPrice(ticker);
-    } catch {
-      livePrice = null;
-    }
-
-    if (livePrice === null) {
-      Alert.alert(
-        "Price not found",
-        `Could not fetch a live price for "${ticker}". Check the ticker symbol and try again.`,
-        [{ text: "OK" }]
-      );
-      setAdding(false);
-      return;
-    }
-
     await insertInvestment({
-      broker_name: broker,
+      broker_name: broker.trim() || "Manual",
       source_type: "Manual",
       ticker,
-      shares,
-      avg_price: livePrice,
-      currency: form.currency,
+      shares: sharesNum,
+      avg_price: avgPrice,
+      currency,
     });
 
-    setForm({ ticker: "", shares: "", currency: "USD", broker_name: "" });
+    resetForm();
     setShowAdd(false);
     setAdding(false);
     if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -199,9 +277,9 @@ export default function PortfolioScreen() {
     ]);
   }
 
-  async function changeHomeCurrency(currency: string) {
-    setHomeCurrency(currency);
-    await setSetting("home_currency", currency);
+  async function changeHomeCurrency(c: string) {
+    setHomeCurrency(c);
+    await setSetting("home_currency", c);
     await loadAndPrice();
   }
 
@@ -217,7 +295,9 @@ export default function PortfolioScreen() {
       <ScrollView
         contentContainerStyle={{ paddingTop: topPad + 16, paddingBottom: bottomPad, paddingHorizontal: 16 }}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
+        {/* Header */}
         <View style={styles.header}>
           <View>
             <Text style={[styles.screenTitle, { color: colors.foreground }]}>Portfolio</Text>
@@ -230,7 +310,7 @@ export default function PortfolioScreen() {
               <Feather name="refresh-cw" size={16} color={loading ? colors.mutedForeground : colors.primary} />
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() => setShowAdd(true)}
+              onPress={() => { resetForm(); setShowAdd(true); }}
               style={[styles.addBtn, { backgroundColor: colors.primary }]}
             >
               <Feather name="plus" size={16} color={colors.background} />
@@ -252,8 +332,8 @@ export default function PortfolioScreen() {
               {totalCost > 0 && (
                 <Text style={[styles.nwPnl, { color: isPnlPositive ? colors.credit : colors.debit }]}>
                   {isPnlPositive ? "▲" : "▼"} {Math.abs(totalPnlPct).toFixed(2)}%
-                  {"  "}({isPnlPositive ? "+" : ""}
-                  {homeCurrency} {Math.abs(totalPnl).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                  {"  "}({isPnlPositive ? "+" : "-"}{homeCurrency}{" "}
+                  {Math.abs(totalPnl).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
                 </Text>
               )}
             </>
@@ -268,11 +348,7 @@ export default function PortfolioScreen() {
               <TouchableOpacity
                 key={c}
                 onPress={() => changeHomeCurrency(c)}
-                style={[
-                  styles.currencyChip,
-                  homeCurrency === c && { backgroundColor: colors.primary },
-                  { borderColor: colors.border },
-                ]}
+                style={[styles.currencyChip, homeCurrency === c && { backgroundColor: colors.primary }, { borderColor: colors.border }]}
               >
                 <Text style={[styles.currencyChipText, { color: homeCurrency === c ? colors.background : colors.mutedForeground }]}>
                   {c}
@@ -288,7 +364,7 @@ export default function PortfolioScreen() {
             <View style={styles.emptyBox}>
               <Feather name="trending-up" size={28} color={colors.mutedForeground} />
               <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-                Tap + to add a holding. The current price is used as your cost basis.
+                Tap + to add a holding. Search by company name or ticker.
               </Text>
             </View>
           ) : (
@@ -296,11 +372,7 @@ export default function PortfolioScreen() {
               const isUp = (h.pnl ?? 0) >= 0;
               return (
                 <View key={h.id}>
-                  <TouchableOpacity
-                    style={styles.holdingRow}
-                    onLongPress={() => removeHolding(h.id)}
-                    activeOpacity={0.8}
-                  >
+                  <TouchableOpacity style={styles.holdingRow} onLongPress={() => removeHolding(h.id)} activeOpacity={0.8}>
                     <View style={[styles.tickerBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
                       <Text style={[styles.tickerText, { color: colors.primary }]}>{h.ticker}</Text>
                     </View>
@@ -308,6 +380,7 @@ export default function PortfolioScreen() {
                       <Text style={[styles.holdingBroker, { color: colors.foreground }]}>{h.broker_name}</Text>
                       <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>
                         {h.shares} shares · {h.currency}
+                        {h.currentPrice !== null ? ` · @${h.currentPrice.toFixed(2)}` : ""}
                       </Text>
                     </View>
                     <View style={styles.holdingRight}>
@@ -326,9 +399,7 @@ export default function PortfolioScreen() {
                       )}
                     </View>
                   </TouchableOpacity>
-                  {i < holdings.length - 1 && (
-                    <View style={[styles.divider, { backgroundColor: colors.border }]} />
-                  )}
+                  {i < holdings.length - 1 && <View style={[styles.divider, { backgroundColor: colors.border }]} />}
                 </View>
               );
             })
@@ -340,48 +411,107 @@ export default function PortfolioScreen() {
         </Text>
       </ScrollView>
 
-      {/* Add holding modal */}
+      {/* ── Add holding modal ── */}
       <Modal visible={showAdd} animationType="slide" transparent presentationStyle="pageSheet">
         <View style={[styles.modal, { backgroundColor: "#0D1121" }]}>
           <View style={styles.modalHandle} />
           <Text style={[styles.modalTitle, { color: colors.foreground }]}>Add Holding</Text>
           <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
-            Today's live price will be used as your cost basis
+            Search by company name or ticker symbol
           </Text>
 
-          {[
-            { label: "Ticker Symbol", key: "ticker", placeholder: "e.g. AAPL", autoCapitalize: "characters" as const, keyboard: "default" as const },
-            { label: "Shares", key: "shares", placeholder: "e.g. 10.5", autoCapitalize: "none" as const, keyboard: "decimal-pad" as const },
-            { label: "Broker / Account (optional)", key: "broker_name", placeholder: "e.g. Freetrade", autoCapitalize: "words" as const, keyboard: "default" as const },
-          ].map(({ label, key, placeholder, autoCapitalize, keyboard }) => (
-            <View key={key} style={styles.fieldGroup}>
-              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>{label}</Text>
+          {/* Company search */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Company or Ticker</Text>
+            <View style={styles.searchInputRow}>
               <TextInput
-                style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
-                placeholder={placeholder}
+                style={[styles.input, styles.searchInput, { color: colors.foreground, borderColor: selectedCompany ? colors.primary : colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+                placeholder="e.g. Apple or AAPL"
                 placeholderTextColor={colors.mutedForeground}
-                value={(form as Record<string, string>)[key]}
-                onChangeText={(v) => setForm((f) => ({ ...f, [key]: v }))}
-                autoCapitalize={autoCapitalize}
-                keyboardType={keyboard}
+                value={searchQuery}
+                onChangeText={handleSearchChange}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              {searching && <ActivityIndicator color={colors.primary} style={styles.searchSpinner} size="small" />}
+            </View>
+            {selectedCompany && (
+              <View style={[styles.selectedBadge, { backgroundColor: "rgba(0,212,255,0.10)", borderColor: colors.primary }]}>
+                <Feather name="check-circle" size={13} color={colors.primary} />
+                <Text style={[styles.selectedText, { color: colors.primary }]}>
+                  {selectedCompany.name} · {selectedCompany.exchange}
+                </Text>
+              </View>
+            )}
+            {searchResults.length > 0 && (
+              <View style={[styles.dropdown, { backgroundColor: "#141928", borderColor: colors.border }]}>
+                {searchResults.map((r, idx) => (
+                  <TouchableOpacity
+                    key={r.symbol}
+                    style={[styles.dropdownItem, idx < searchResults.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }]}
+                    onPress={() => selectCompany(r)}
+                  >
+                    <Text style={[styles.dropdownTicker, { color: colors.primary }]}>{r.symbol}</Text>
+                    <Text style={[styles.dropdownName, { color: colors.foreground }]} numberOfLines={1}>{r.name}</Text>
+                    <Text style={[styles.dropdownExchange, { color: colors.mutedForeground }]}>{r.exchange}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+
+          {/* Shares */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Number of Shares</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. 10.5"
+              placeholderTextColor={colors.mutedForeground}
+              value={shares}
+              onChangeText={setShares}
+              keyboardType="decimal-pad"
+            />
+          </View>
+
+          {/* Manual price (only shown if live fetch failed) */}
+          {needsManualPrice && (
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: "#F59E0B" }]}>Current Price (manual — live price unavailable)</Text>
+              <TextInput
+                style={[styles.input, { color: colors.foreground, borderColor: "#F59E0B", backgroundColor: "rgba(245,158,11,0.05)" }]}
+                placeholder="e.g. 178.50"
+                placeholderTextColor={colors.mutedForeground}
+                value={manualPrice}
+                onChangeText={setManualPrice}
+                keyboardType="decimal-pad"
               />
             </View>
-          ))}
+          )}
 
+          {/* Broker */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Broker / Account (optional)</Text>
+            <TextInput
+              style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: "rgba(255,255,255,0.05)" }]}
+              placeholder="e.g. Freetrade"
+              placeholderTextColor={colors.mutedForeground}
+              value={broker}
+              onChangeText={setBroker}
+              autoCapitalize="words"
+            />
+          </View>
+
+          {/* Currency */}
           <View style={styles.fieldGroup}>
             <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Currency</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {CURRENCIES.map((c) => (
                 <TouchableOpacity
                   key={c}
-                  onPress={() => setForm((f) => ({ ...f, currency: c }))}
-                  style={[
-                    styles.currencyChip,
-                    form.currency === c && { backgroundColor: colors.primary },
-                    { borderColor: colors.border },
-                  ]}
+                  onPress={() => setCurrency(c)}
+                  style={[styles.currencyChip, currency === c && { backgroundColor: colors.primary }, { borderColor: colors.border }]}
                 >
-                  <Text style={[styles.currencyChipText, { color: form.currency === c ? colors.background : colors.mutedForeground }]}>
+                  <Text style={[styles.currencyChipText, { color: currency === c ? colors.background : colors.mutedForeground }]}>
                     {c}
                   </Text>
                 </TouchableOpacity>
@@ -392,7 +522,7 @@ export default function PortfolioScreen() {
           <View style={[styles.modalActions, { paddingBottom: insets.bottom + 20 }]}>
             <TouchableOpacity
               style={[styles.modalBtn, styles.cancelBtn, { borderColor: colors.border }]}
-              onPress={() => { setShowAdd(false); setForm({ ticker: "", shares: "", currency: "USD", broker_name: "" }); }}
+              onPress={() => { setShowAdd(false); resetForm(); }}
             >
               <Text style={{ color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Cancel</Text>
             </TouchableOpacity>
@@ -404,7 +534,9 @@ export default function PortfolioScreen() {
               {adding ? (
                 <ActivityIndicator color={colors.background} size="small" />
               ) : (
-                <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>Add</Text>
+                <Text style={{ color: colors.background, fontFamily: "Inter_600SemiBold" }}>
+                  {needsManualPrice ? "Add with manual price" : "Add"}
+                </Text>
               )}
             </TouchableOpacity>
           </View>
@@ -552,7 +684,7 @@ const styles = StyleSheet.create({
     flex: 1,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    marginTop: 100,
+    marginTop: 60,
     paddingTop: 12,
     paddingHorizontal: 20,
   },
@@ -580,6 +712,61 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_500Medium",
     marginBottom: 6,
+  },
+  searchInputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    position: "relative",
+  },
+  searchInput: {
+    flex: 1,
+  },
+  searchSpinner: {
+    position: "absolute",
+    right: 12,
+  },
+  selectedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignSelf: "flex-start",
+  },
+  selectedText: {
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+  },
+  dropdown: {
+    marginTop: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  dropdownItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  dropdownTicker: {
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    minWidth: 52,
+  },
+  dropdownName: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+  },
+  dropdownExchange: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    flexShrink: 0,
   },
   input: {
     borderWidth: 1,

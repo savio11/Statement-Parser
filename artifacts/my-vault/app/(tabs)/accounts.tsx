@@ -32,9 +32,11 @@ import {
 import {
   cancelReminder,
   getReminderSettings,
+  notifyNewSubscription,
   requestNotificationPermissions,
   scheduleMonthlyReminder,
 } from "@/lib/notifications";
+import { detectSubscriptions } from "@/lib/subscriptions";
 import { useColors } from "@/hooks/useColors";
 
 interface ParsedTx {
@@ -267,11 +269,33 @@ export default function AccountsScreen() {
   }
 
   async function confirmImport() {
+    const beforeTxs = await getTransactions(2000);
+    const beforeSubs = new Set(detectSubscriptions(beforeTxs).map((s) => s.normalizedKey));
+
     await insertTransactions(previewTxs);
+
+    const afterTxs = await getTransactions(2000);
+    const afterSubs = detectSubscriptions(afterTxs);
+    const newSubs = afterSubs.filter((s) => !beforeSubs.has(s.normalizedKey));
+
     setPreviewVisible(false);
     setPreviewTxs([]);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     await load();
+
+    for (const sub of newSubs) {
+      notifyNewSubscription(sub.merchant, sub.monthlyEquiv).catch(() => {});
+    }
+
+    if (newSubs.length > 0) {
+      const names = newSubs.slice(0, 3).map((s) => `• ${s.merchant} (${s.frequencyLabel}, £${s.monthlyEquiv.toFixed(2)}/mo)`).join("\n");
+      const extra = newSubs.length > 3 ? `\n+${newSubs.length - 3} more` : "";
+      Alert.alert(
+        `${newSubs.length} new recurring charge${newSubs.length > 1 ? "s" : ""} detected`,
+        names + extra,
+        [{ text: "OK" }]
+      );
+    }
   }
 
   async function clearAll() {
