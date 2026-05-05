@@ -371,9 +371,15 @@ export default function AccountsScreen() {
           .toLocaleString("en-GB", { month: "long", year: "numeric" });
         const credits = txs.filter(t => t.type === "credit").reduce((s, t) => s + t.amount, 0);
         const debits  = txs.filter(t => t.type === "debit").reduce((s, t) => s + t.amount, 0);
-        return { month, label, txs, credits, debits };
+        // Use the month's own currency symbol if all transactions share one currency,
+        // otherwise fall back to the home currency symbol.
+        const currencies = [...new Set(txs.map(t => t.currency ?? "GBP"))];
+        const monthSym = currencies.length === 1
+          ? getCurrencySymbol(currencies[0])
+          : getCurrencySymbol(homeCurrency);
+        return { month, label, txs, credits, debits, monthSym };
       });
-  }, [filtered]);
+  }, [filtered, homeCurrency]);
 
   function toggleMonth(month: string) {
     setExpandedMonths(prev => {
@@ -478,7 +484,7 @@ export default function AccountsScreen() {
             </View>
           </GlassCard>
         ) : (
-          monthGroups.map(({ month, label, txs, credits, debits }) => {
+          monthGroups.map(({ month, label, txs, credits, debits, monthSym }) => {
             const expanded = expandedMonths.has(month);
             return (
               <GlassCard key={month} padding={0} style={{ marginBottom: 10 }}>
@@ -493,11 +499,11 @@ export default function AccountsScreen() {
                     <Text style={[styles.monthLabel, { color: colors.foreground }]}>{label}</Text>
                     <View style={styles.monthMeta}>
                       <Text style={[styles.monthMetaText, { color: colors.credit }]}>
-                        +{getCurrencySymbol(homeCurrency)}{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        +{monthSym}{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                       </Text>
                       <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}> · </Text>
                       <Text style={[styles.monthMetaText, { color: colors.debit }]}>
-                        -{getCurrencySymbol(homeCurrency)}{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        -{monthSym}{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                       </Text>
                       <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}>
                         {" · "}{txs.length} transaction{txs.length !== 1 ? "s" : ""}
