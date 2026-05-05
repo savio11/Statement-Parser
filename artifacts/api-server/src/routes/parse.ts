@@ -57,7 +57,7 @@ type ParserStrategy = "credit-card" | "running-balance" | "deposits-withdrawals"
 
 // ─── Shared utilities ──────────────────────────────────────────────────────────
 
-function categorize(merchant: string): string {
+function categorize(merchant: string, type?: "credit" | "debit"): string {
   const m = merchant.toLowerCase();
   if (/mcdonalds|kfc|subway|pizza|burger|restaurant|cafe|starbucks|costa|tesco|asda|sainsbury|lidl|aldi|waitrose|morrisons|takeaway|sushi|indian|chinese|thai|hasty|lahori|mowgli|taj mahal|streate|botanic|nandos|tortilla|deliveroo|just eat|uber eats|pret|greggs|wasabi|caffe|coffee|donut|moes peri|haute dolci|kitchen pizzeria|ifly|b518_bar/.test(m)) return "Food & Dining";
   if (/uber|lyft|trainline|rail|tube|lul\s|tfl|arriva|bus|taxi|transport|parking|petrol|fuel|shell|railcard|ticket machine|thetrainline/.test(m)) return "Transport";
@@ -68,7 +68,9 @@ function categorize(merchant: string): string {
   if (/gym|fitness|sport|running|yoga|pilates|swimming/.test(m)) return "Health & Fitness";
   if (/holiday|hotel|airbnb|booking|expedia|flight|easyjet|ryanair|british airways|hilton|marriott|aloft/.test(m)) return "Travel";
   if (/salary|payroll|wage|income|facebook|google|employer/.test(m)) return "Income";
-  if (/neft|imps|rtgs|chaps|faster payment|payment received|transfer|revolut|monzo|paypal|cash app|wise|splitwise|refund|cashback/.test(m)) return "Transfers";
+  // NEFT/IMPS/RTGS: incoming = Income, outgoing = Transfers
+  if (/neft|imps|rtgs/.test(m)) return type === "debit" ? "Transfers" : "Income";
+  if (/chaps|faster payment|payment received|transfer|revolut|monzo|paypal|cash app|wise|splitwise|refund|cashback/.test(m)) return "Transfers";
   if (/credit interest|dividend|interest earned|interest credited/.test(m)) return "Income";
   return "Other";
 }
@@ -201,7 +203,7 @@ function parseRunningBalance(text: string): ParsedTransaction[] {
           merchant: p.merchant,
           amount: parseFloat(p.amount.toFixed(2)),
           type,
-          category: categorize(p.merchant),
+          category: categorize(p.merchant, type),
         });
       }
     }
@@ -441,7 +443,7 @@ function parseCreditCardColumns(text: string): ParsedTransaction[] {
         date, description: merchant, merchant,
         amount: parseFloat(amount.toFixed(2)),
         type,
-        category: categorize(merchant),
+        category: categorize(merchant, type),
       });
     }
   }
@@ -504,7 +506,7 @@ function parseGeneric(text: string): ParsedTransaction[] {
       merchant,
       amount: parseFloat(amounts[0].toFixed(2)),
       type: isCredit ? "credit" : "debit",
-      category: categorize(merchant),
+      category: categorize(merchant, isCredit ? "credit" : "debit"),
     });
   }
 
@@ -554,7 +556,7 @@ function parseCSVText(text: string): ParsedTransaction[] {
     }
 
     const merchant = desc || "Unknown";
-    results.push({ date, description: merchant, merchant, amount, type, category: categorize(merchant) });
+    results.push({ date, description: merchant, merchant, amount, type, category: categorize(merchant, type) });
   }
   return results;
 }
@@ -626,8 +628,8 @@ function parseDepositsWithdrawals(text: string): ParsedTransaction[] {
 
     const rawMerchant = pickMerchant(descLines);
     const cleanMerchant = rawMerchant.replace(/^(neft|imps|rtgs)\s+from\s*/i, "").replace(/^upi[-\/\s]*/i, "").trim();
-    // Categorize against raw (pre-strip) so NEFT/IMPS/RTGS keywords are visible
-    const category = categorize(rawMerchant) !== "Other" ? categorize(rawMerchant) : categorize(cleanMerchant);
+    // Categorize against raw (pre-strip) so NEFT/IMPS/RTGS keywords survive; pass type for credit/debit split
+    const category = categorize(rawMerchant, type) !== "Other" ? categorize(rawMerchant, type) : categorize(cleanMerchant, type);
     results.push({
       date: currentDate!,
       description: rawMerchant,
