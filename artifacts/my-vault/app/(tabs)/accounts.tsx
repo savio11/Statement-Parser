@@ -32,7 +32,7 @@ import {
   updateTransactionCategory,
   type Transaction,
 } from "@/lib/database";
-import { CURRENCIES, getCurrencySymbol } from "@/lib/currency";
+import { CURRENCIES, getCurrencySymbol, fetchExchangeRate } from "@/lib/currency";
 import {
   cancelReminder,
   getReminderSettings,
@@ -182,6 +182,7 @@ export default function AccountsScreen() {
   const [recatTx, setRecatTx] = useState<Transaction | null>(null);
   const [importCurrency, setImportCurrency] = useState("GBP");
   const [homeCurrency, setHomeCurrency] = useState("GBP");
+  const [fxRates, setFxRates] = useState<Record<string, number>>({});
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderDay, setReminderDay] = useState(1);
   const [showDayPicker, setShowDayPicker] = useState(false);
@@ -193,11 +194,19 @@ export default function AccountsScreen() {
       getReminderSettings(),
       getSetting("home_currency", "GBP"),
     ]);
+    const homeCur = hc || "GBP";
     setTransactions(txs);
     setTotals(tot);
     setReminderEnabled(reminder.enabled);
     setReminderDay(reminder.day);
-    setHomeCurrency(hc || "GBP");
+    setHomeCurrency(homeCur);
+
+    // Fetch FX rates for every currency present in transactions → home currency
+    const uniqueCurs = [...new Set(txs.map((t) => t.currency ?? "GBP"))];
+    const rateEntries = await Promise.all(
+      uniqueCurs.map((c) => fetchExchangeRate(c, homeCur).then((r) => [c, r] as [string, number]))
+    );
+    setFxRates(Object.fromEntries(rateEntries));
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -356,6 +365,8 @@ export default function AccountsScreen() {
 
   const filtered = filter === "all" ? transactions : transactions.filter((t) => t.type === filter);
 
+  const homeSym = getCurrencySymbol(homeCurrency);
+
   const monthGroups = useMemo(() => {
     const byMonth: Record<string, Transaction[]> = {};
     for (const tx of filtered) {
@@ -369,17 +380,13 @@ export default function AccountsScreen() {
         const [y, mo] = month.split("-");
         const label = new Date(parseInt(y), parseInt(mo) - 1, 1)
           .toLocaleString("en-GB", { month: "long", year: "numeric" });
-        const credits = txs.filter(t => t.type === "credit").reduce((s, t) => s + t.amount, 0);
-        const debits  = txs.filter(t => t.type === "debit").reduce((s, t) => s + t.amount, 0);
-        // Use the month's own currency symbol if all transactions share one currency,
-        // otherwise fall back to the home currency symbol.
-        const currencies = [...new Set(txs.map(t => t.currency ?? "GBP"))];
-        const monthSym = currencies.length === 1
-          ? getCurrencySymbol(currencies[0])
-          : getCurrencySymbol(homeCurrency);
-        return { month, label, txs, credits, debits, monthSym };
+        // Convert every transaction to home currency before summing
+        const convert = (t: Transaction) => t.amount * (fxRates[t.currency ?? "GBP"] ?? 1);
+        const credits = txs.filter(t => t.type === "credit").reduce((s, t) => s + convert(t), 0);
+        const debits  = txs.filter(t => t.type === "debit").reduce((s, t) => s + convert(t), 0);
+        return { month, label, txs, credits, debits };
       });
-  }, [filtered, homeCurrency]);
+  }, [filtered, fxRates]);
 
   function toggleMonth(month: string) {
     setExpandedMonths(prev => {
@@ -484,7 +491,7 @@ export default function AccountsScreen() {
             </View>
           </GlassCard>
         ) : (
-          monthGroups.map(({ month, label, txs, credits, debits, monthSym }) => {
+          monthGroups.map(({ month, label, txs, credits, debits }) => {
             const expanded = expandedMonths.has(month);
             return (
               <GlassCard key={month} padding={0} style={{ marginBottom: 10 }}>
@@ -499,11 +506,11 @@ export default function AccountsScreen() {
                     <Text style={[styles.monthLabel, { color: colors.foreground }]}>{label}</Text>
                     <View style={styles.monthMeta}>
                       <Text style={[styles.monthMetaText, { color: colors.credit }]}>
-                        +{monthSym}{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        +{homeSym}{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                       </Text>
                       <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}> · </Text>
                       <Text style={[styles.monthMetaText, { color: colors.debit }]}>
-                        -{monthSym}{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        -{homeSym}{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                       </Text>
                       <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}>
                         {" · "}{txs.length} transaction{txs.length !== 1 ? "s" : ""}
