@@ -169,6 +169,7 @@ export default function PortfolioScreen() {
       setTotalCost(0);
       setLoading(false);
       setSetting("portfolio_total_value", assetTotal.toFixed(2)).catch(() => {});
+      setSetting("portfolio_total_currency", hc).catch(() => {});
       return;
     }
 
@@ -227,6 +228,7 @@ export default function PortfolioScreen() {
     setTotalCost(tc);
     setLoading(false);
     setSetting("portfolio_total_value", grandTotal.toFixed(2)).catch(() => {});
+    setSetting("portfolio_total_currency", hc).catch(() => {});
   }, []);
 
   useEffect(() => { loadAndPrice(); }, [loadAndPrice]);

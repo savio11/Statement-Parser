@@ -319,7 +319,7 @@ export default function DashboardScreen() {
   const [dashboardCurrency, setDashboardCurrency] = useState("GBP");
 
   const load = useCallback(async () => {
-    const [cfRaw, allTx, totByCur, bk, bg, ms, pv, savedCur] = await Promise.all([
+    const [cfRaw, allTx, totByCur, bk, bg, ms, pv, pvCur, savedCur] = await Promise.all([
       getMonthlyCashflowByCurrency(),
       getTransactions(500),
       getTotalsByCurrency(),
@@ -327,16 +327,19 @@ export default function DashboardScreen() {
       getBudgets(),
       getThisMonthCategorySpend(),
       getSetting("portfolio_total_value", "0"),
+      getSetting("portfolio_total_currency", "GBP"),
       getSetting("home_currency", "GBP"),
     ]);
 
     const dc = savedCur || "GBP";
     setDashboardCurrency(dc);
 
-    // Collect all currencies present in transaction data
+    // Collect all currencies present in transaction data + portfolio currency
+    const portfolioCur = pvCur || "GBP";
     const allCurrencies = [...new Set([
       ...Object.keys(totByCur),
       ...cfRaw.map((r) => r.currency),
+      portfolioCur,
     ])];
 
     // Fetch all FX rates in parallel
@@ -376,7 +379,10 @@ export default function DashboardScreen() {
     setBudgets(bg);
     setMonthSpend(ms);
     setSubscriptions(detectSubscriptions(allTx));
-    setPortfolioValue(parseFloat(pv) || 0);
+    // Convert portfolio total from the currency it was saved in → display currency
+    const pvRaw = parseFloat(pv) || 0;
+    const pvRate = rateMap[portfolioCur] ?? 1;
+    setPortfolioValue(+(pvRaw * pvRate).toFixed(2));
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
