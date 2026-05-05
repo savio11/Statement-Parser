@@ -110,6 +110,9 @@ export default function PortfolioScreen() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
+  // Broker group expand/collapse
+  const [expandedBrokers, setExpandedBrokers] = useState<Set<string>>(new Set());
+
   // Holdings import state
   const [showImportHoldings, setShowImportHoldings] = useState(false);
   const [importUploading, setImportUploading] = useState(false);
@@ -391,6 +394,47 @@ export default function PortfolioScreen() {
     await loadAndPrice();
   }
 
+  function toggleBroker(broker: string) {
+    setExpandedBrokers((prev) => {
+      const next = new Set(prev);
+      if (next.has(broker)) next.delete(broker); else next.add(broker);
+      return next;
+    });
+  }
+
+  async function deleteBroker(brokerName: string, count: number) {
+    Alert.alert(
+      `Delete ${brokerName}?`,
+      `This will permanently remove all ${count} holding${count !== 1 ? "s" : ""} from ${brokerName}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete All",
+          style: "destructive",
+          onPress: async () => {
+            await deleteInvestmentsByBroker(brokerName);
+            if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+            await loadAndPrice();
+          },
+        },
+      ]
+    );
+  }
+
+  // Group holdings by broker for the collapsed/expanded view
+  const brokerGroups = React.useMemo(() => {
+    const byBroker: Record<string, HoldingWithPrice[]> = {};
+    for (const h of holdings) {
+      if (!byBroker[h.broker_name]) byBroker[h.broker_name] = [];
+      byBroker[h.broker_name].push(h);
+    }
+    return Object.entries(byBroker).map(([broker, hs]) => {
+      const totalValue = hs.reduce((s, h) => s + (h.valueInHomeCurrency ?? 0), 0);
+      const priced = hs.filter((h) => h.currentPrice !== null);
+      return { broker, holdings: hs, totalValue, pricedCount: priced.length };
+    });
+  }, [holdings]);
+
   async function changeHomeCurrency(c: string) {
     setHomeCurrency(c);
     await setSetting("home_currency", c);
@@ -632,79 +676,117 @@ export default function PortfolioScreen() {
           </ScrollView>
         </GlassCard>
 
-        {/* Holdings list */}
-        <GlassCard padding={0} style={{ marginBottom: 12 }}>
-          {holdings.length === 0 ? (
+        {/* Holdings list — grouped by broker */}
+        {holdings.length === 0 ? (
+          <GlassCard padding={0} style={{ marginBottom: 12 }}>
             <View style={styles.emptyBox}>
               <Feather name="trending-up" size={28} color={colors.mutedForeground} />
               <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
                 Tap + to add a holding. Search by company name or ticker.
               </Text>
             </View>
-          ) : (
-            holdings.map((h, i) => {
-              const isUp = (h.pnl ?? 0) >= 0;
-              const isSelected = selectedIds.has(h.id);
-              return (
-                <View key={h.id}>
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    onLongPress={() => enterSelectMode(h.id)}
-                    onPress={() => selectMode ? toggleSelect(h.id) : openEdit(h)}
-                    style={[
-                      styles.holdingRow,
-                      isSelected && { backgroundColor: "rgba(0,212,255,0.07)" },
-                    ]}
-                  >
-                    {selectMode && (
-                      <View style={[
-                        styles.checkbox,
-                        { borderColor: isSelected ? colors.primary : colors.border },
-                        isSelected && { backgroundColor: colors.primary },
-                      ]}>
-                        {isSelected && <Feather name="check" size={11} color={colors.background} />}
-                      </View>
-                    )}
-                    <View style={[styles.tickerBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
-                      <Text style={[styles.tickerText, { color: colors.primary }]}>{h.ticker}</Text>
-                    </View>
-                    <View style={styles.holdingMiddle}>
-                      <Text style={[styles.holdingBroker, { color: colors.foreground }]}>{h.broker_name}</Text>
-                      <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>
-                        {h.shares} sh · {h.currency}
-                        {h.currentPrice !== null ? ` · @${h.currentPrice.toFixed(2)}` : ""}
-                      </Text>
-                    </View>
-                    <View style={styles.holdingRight}>
-                      {h.currentPrice !== null ? (
-                        <>
-                          <Text style={[styles.holdingValue, { color: colors.foreground }]}>
-                            {homeCurrency}{" "}
-                            {(h.valueInHomeCurrency ?? 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </GlassCard>
+        ) : (
+          brokerGroups.map(({ broker, holdings: bhs, totalValue: bv }) => {
+            const expanded = expandedBrokers.has(broker);
+            return (
+              <GlassCard key={broker} padding={0} style={{ marginBottom: 10 }}>
+                {/* Broker header */}
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => toggleBroker(broker)}
+                  onLongPress={() => deleteBroker(broker, bhs.length)}
+                  delayLongPress={500}
+                  style={styles.brokerHeader}
+                >
+                  <View style={[styles.brokerIconBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
+                    <Feather name="briefcase" size={16} color={colors.primary} />
+                  </View>
+                  <View style={styles.brokerMiddle}>
+                    <Text style={[styles.brokerName, { color: colors.foreground }]}>{broker}</Text>
+                    <Text style={[styles.brokerMeta, { color: colors.mutedForeground }]}>
+                      {bhs.length} holding{bhs.length !== 1 ? "s" : ""}
+                    </Text>
+                  </View>
+                  <View style={styles.brokerRight}>
+                    <Text style={[styles.brokerValue, { color: colors.primary }]}>
+                      {homeCurrency} {bv.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </Text>
+                  </View>
+                  <Feather
+                    name={expanded ? "chevron-up" : "chevron-down"}
+                    size={16}
+                    color={colors.mutedForeground}
+                    style={{ marginLeft: 6 }}
+                  />
+                </TouchableOpacity>
+
+                {/* Individual holdings (shown when expanded) */}
+                {expanded && bhs.map((h, i) => {
+                  const isUp = (h.pnl ?? 0) >= 0;
+                  const isSelected = selectedIds.has(h.id);
+                  return (
+                    <View key={h.id}>
+                      <View style={[styles.divider, { backgroundColor: colors.border }]} />
+                      <TouchableOpacity
+                        activeOpacity={0.7}
+                        onLongPress={() => enterSelectMode(h.id)}
+                        onPress={() => selectMode ? toggleSelect(h.id) : openEdit(h)}
+                        style={[
+                          styles.holdingRow,
+                          isSelected && { backgroundColor: "rgba(0,212,255,0.07)" },
+                        ]}
+                      >
+                        {selectMode && (
+                          <View style={[
+                            styles.checkbox,
+                            { borderColor: isSelected ? colors.primary : colors.border },
+                            isSelected && { backgroundColor: colors.primary },
+                          ]}>
+                            {isSelected && <Feather name="check" size={11} color={colors.background} />}
+                          </View>
+                        )}
+                        <View style={[styles.tickerBadge, { backgroundColor: "rgba(0,212,255,0.10)" }]}>
+                          <Text style={[styles.tickerText, { color: colors.primary }]}>{h.ticker}</Text>
+                        </View>
+                        <View style={styles.holdingMiddle}>
+                          <Text style={[styles.holdingBroker, { color: colors.foreground }]}>{h.ticker}</Text>
+                          <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>
+                            {h.shares} sh · {h.currency}
+                            {h.currentPrice !== null ? ` · @${h.currentPrice.toFixed(2)}` : ""}
                           </Text>
-                          <Text style={[styles.holdingPnl, { color: isUp ? colors.credit : colors.debit }]}>
-                            {isUp ? "+" : ""}{(h.pnlPct ?? 0).toFixed(2)}%
-                          </Text>
-                        </>
-                      ) : (
-                        <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>No price</Text>
-                      )}
+                        </View>
+                        <View style={styles.holdingRight}>
+                          {h.currentPrice !== null ? (
+                            <>
+                              <Text style={[styles.holdingValue, { color: colors.foreground }]}>
+                                {homeCurrency}{" "}
+                                {(h.valueInHomeCurrency ?? 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </Text>
+                              <Text style={[styles.holdingPnl, { color: isUp ? colors.credit : colors.debit }]}>
+                                {isUp ? "+" : ""}{(h.pnlPct ?? 0).toFixed(2)}%
+                              </Text>
+                            </>
+                          ) : (
+                            <Text style={[styles.holdingMeta, { color: colors.mutedForeground }]}>No price</Text>
+                          )}
+                        </View>
+                        {!selectMode && (
+                          <View style={styles.editBtn}>
+                            <Feather name="edit-2" size={14} color={colors.mutedForeground} />
+                          </View>
+                        )}
+                      </TouchableOpacity>
                     </View>
-                    {!selectMode && (
-                      <View style={styles.editBtn}>
-                        <Feather name="edit-2" size={14} color={colors.mutedForeground} />
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                  {i < holdings.length - 1 && <View style={[styles.divider, { backgroundColor: colors.border }]} />}
-                </View>
-              );
-            })
-          )}
-        </GlassCard>
+                  );
+                })}
+              </GlassCard>
+            );
+          })
+        )}
 
         <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-          Tap ✏️ to edit stocks · Prices via Yahoo Finance
+          Tap broker to expand · Long press to delete all holdings
         </Text>
 
         {/* Other Assets section */}
@@ -1534,5 +1616,34 @@ const styles = StyleSheet.create({
   assetTypeChipText: {
     fontSize: 12,
     fontFamily: "Inter_500Medium",
+  },
+  brokerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  brokerIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  brokerMiddle: { flex: 1 },
+  brokerName: {
+    fontSize: 15,
+    fontFamily: "Inter_600SemiBold",
+  },
+  brokerMeta: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
+  },
+  brokerRight: { alignItems: "flex-end" },
+  brokerValue: {
+    fontSize: 14,
+    fontFamily: "Inter_700Bold",
   },
 });
