@@ -2,6 +2,7 @@ import { Feather } from "@expo/vector-icons";
 import React from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useColors } from "@/hooks/useColors";
+import { getCurrencySymbol } from "@/lib/currency";
 import type { Transaction } from "@/lib/database";
 
 export const ALL_CATEGORIES = [
@@ -44,6 +45,7 @@ export function TransactionItem({ tx, onPress }: Props) {
   const isCredit = tx.type === "credit";
   const icon = CATEGORY_ICONS[tx.category] ?? "•";
   const dateStr = tx.date.substring(5).replace("-", "/");
+  const symbol = getCurrencySymbol(tx.currency ?? "GBP");
 
   const inner = (
     <View style={styles.row}>
@@ -64,7 +66,7 @@ export function TransactionItem({ tx, onPress }: Props) {
         </View>
       </View>
       <Text style={[styles.amount, { color: isCredit ? colors.credit : colors.debit }]}>
-        {isCredit ? "+" : "-"}£{tx.amount.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        {isCredit ? "+" : "-"}{symbol}{tx.amount.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
       </Text>
     </View>
   );

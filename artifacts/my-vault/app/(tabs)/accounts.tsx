@@ -25,6 +25,7 @@ import {
   deleteAllTransactions,
   deleteTransaction,
   deleteTransactionsByMonth,
+  getSetting,
   getTransactions,
   getTotals,
   insertTransactions,
@@ -180,20 +181,23 @@ export default function AccountsScreen() {
   const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set([currentMonth]));
   const [recatTx, setRecatTx] = useState<Transaction | null>(null);
   const [importCurrency, setImportCurrency] = useState("GBP");
+  const [homeCurrency, setHomeCurrency] = useState("GBP");
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderDay, setReminderDay] = useState(1);
   const [showDayPicker, setShowDayPicker] = useState(false);
 
   const load = useCallback(async () => {
-    const [txs, tot, reminder] = await Promise.all([
+    const [txs, tot, reminder, hc] = await Promise.all([
       getTransactions(500),
       getTotals(),
       getReminderSettings(),
+      getSetting("home_currency", "GBP"),
     ]);
     setTransactions(txs);
     setTotals(tot);
     setReminderEnabled(reminder.enabled);
     setReminderDay(reminder.day);
+    setHomeCurrency(hc || "GBP");
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -294,7 +298,7 @@ export default function AccountsScreen() {
     }
 
     if (newSubs.length > 0) {
-      const names = newSubs.slice(0, 3).map((s) => `• ${s.merchant} (${s.frequencyLabel}, £${s.monthlyEquiv.toFixed(2)}/mo)`).join("\n");
+      const names = newSubs.slice(0, 3).map((s) => `• ${s.merchant} (${s.frequencyLabel}, ${getCurrencySymbol(homeCurrency)}${s.monthlyEquiv.toFixed(2)}/mo)`).join("\n");
       const extra = newSubs.length > 3 ? `\n+${newSubs.length - 3} more` : "";
       Alert.alert(
         `${newSubs.length} new recurring charge${newSubs.length > 1 ? "s" : ""} detected`,
@@ -489,11 +493,11 @@ export default function AccountsScreen() {
                     <Text style={[styles.monthLabel, { color: colors.foreground }]}>{label}</Text>
                     <View style={styles.monthMeta}>
                       <Text style={[styles.monthMetaText, { color: colors.credit }]}>
-                        +£{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        +{getCurrencySymbol(homeCurrency)}{credits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                       </Text>
                       <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}> · </Text>
                       <Text style={[styles.monthMetaText, { color: colors.debit }]}>
-                        -£{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        -{getCurrencySymbol(homeCurrency)}{debits.toLocaleString("en-GB", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                       </Text>
                       <Text style={[styles.monthMetaText, { color: colors.mutedForeground }]}>
                         {" · "}{txs.length} transaction{txs.length !== 1 ? "s" : ""}
