@@ -174,7 +174,7 @@ function parseRunningBalance(text: string): ParsedTransaction[] {
   const results: ParsedTransaction[] = [];
 
   const dateRe = /^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2,4})|^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/i;
-  const typeCodeRe = /^(BP|VIS|CR|DR|DD|SO|ATM|CHQ|FT|TFR|BAC|FPS|BGC|OTH|CC|\)\)\))\s+/i;
+  const typeCodeRe = /^(BP|OBP|VIS|CR|DR|DD|SO|ATM|CHQ|FT|TFR|STO|BAC|FPS|BGC|OTH|CC|\)\)\))\s+/i;
 
   let lastBalance: number | null = null;
   let currentDate: string | null = null;
@@ -220,7 +220,7 @@ function parseRunningBalance(text: string): ParsedTransaction[] {
     if (typeMatch) {
       const code = typeMatch[1].toUpperCase();
       if (code === "CR" || code === "BGC" || code === "FPS" || code === "BAC") typeHint = "credit";
-      else if (["DR", "BP", "DD", "SO", "VIS", "ATM", "CHQ", "FT", "TFR", ")))"].includes(code)) typeHint = "debit";
+      else if (["DR", "BP", "OBP", "DD", "SO", "STO", "VIS", "ATM", "CHQ", "FT", "TFR", ")))"].includes(code)) typeHint = "debit";
       rest = raw.substring(typeMatch[0].length);
     }
     const merchant = rest.replace(ANY_AMOUNT_RE, "").replace(/\b(CR|DR)\b/gi, "").replace(/\s{2,}/g, " ").trim();
