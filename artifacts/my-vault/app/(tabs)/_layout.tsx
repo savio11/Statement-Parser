@@ -89,6 +89,10 @@ function NativeTabLayout() {
         <Icon sf={{ default: "chart.line.uptrend.xyaxis", selected: "chart.line.uptrend.xyaxis" }} />
         <Label>Portfolio</Label>
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="growth">
+        <Icon sf={{ default: "flask.fill", selected: "flask.fill" }} />
+        <Label>Growth Lab</Label>
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }
@@ -162,6 +166,18 @@ function ClassicTabLayout() {
               <SymbolView name="chart.line.uptrend.xyaxis" tintColor={color} size={22} />
             ) : (
               <Feather name="trending-up" size={22} color={color} />
+            ),
+        }}
+      />
+      <Tabs.Screen
+        name="growth"
+        options={{
+          title: "Growth Lab",
+          tabBarIcon: ({ color }) =>
+            isIOS ? (
+              <SymbolView name="flask.fill" tintColor={color} size={22} />
+            ) : (
+              <Feather name="activity" size={22} color={color} />
             ),
         }}
       />
