@@ -8,7 +8,7 @@ const YF_HEADERS = {
 };
 
 router.get("/stocks/price/:ticker", async (req: Request, res: Response) => {
-  const { ticker } = req.params;
+  const ticker = req.params["ticker"] as string;
   if (!ticker || !/^[A-Za-z0-9.\-^=]+$/.test(ticker)) {
     res.status(400).json({ error: "Invalid ticker" });
     return;

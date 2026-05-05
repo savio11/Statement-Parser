@@ -1,8 +1,43 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { tmpdir } from "os";
+import { join } from "path";
+import { mkdir, writeFile, readdir, unlink, rm } from "fs/promises";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const execFileAsync = promisify(execFile);
+
+const TESSERACT_BIN = "/nix/store/0wkcsvf37i6kizzkdam6a7aadn23mbjw-tesseract-4.1.3/bin/tesseract";
+const TESSDATA_DIR = "/nix/store/0wkcsvf37i6kizzkdam6a7aadn23mbjw-tesseract-4.1.3/share/tessdata";
+
+async function ocrPdf(buffer: Buffer): Promise<string> {
+  const tmpDir = join(tmpdir(), `vault-ocr-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  await mkdir(tmpDir, { recursive: true });
+  const pdfPath = join(tmpDir, "input.pdf");
+  await writeFile(pdfPath, buffer);
+  try {
+    await execFileAsync("pdftoppm", ["-r", "200", "-png", pdfPath, join(tmpDir, "pg")]);
+    const files = (await readdir(tmpDir))
+      .filter((f) => f.endsWith(".png"))
+      .sort()
+      .map((f) => join(tmpDir, f));
+    const texts: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const { stdout } = await execFileAsync(
+        TESSERACT_BIN,
+        [files[i], "stdout", "--tessdata-dir", TESSDATA_DIR, "-l", "eng"],
+        { maxBuffer: 10 * 1024 * 1024 }
+      );
+      texts.push(`-- ${i + 1} of ${files.length} --\n${stdout}`);
+    }
+    return texts.join("\n\n");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 const MONTHS: Record<string, string> = {
   jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
@@ -18,7 +53,7 @@ interface ParsedTransaction {
   category: string;
 }
 
-type ParserStrategy = "credit-card" | "running-balance" | "generic";
+type ParserStrategy = "credit-card" | "running-balance" | "deposits-withdrawals" | "generic";
 
 // ─── Shared utilities ──────────────────────────────────────────────────────────
 
@@ -33,7 +68,8 @@ function categorize(merchant: string): string {
   if (/gym|fitness|sport|running|yoga|pilates|swimming/.test(m)) return "Health & Fitness";
   if (/holiday|hotel|airbnb|booking|expedia|flight|easyjet|ryanair|british airways|hilton|marriott|aloft/.test(m)) return "Travel";
   if (/salary|payroll|wage|income|facebook|google|employer/.test(m)) return "Income";
-  if (/payment received|transfer|revolut|monzo|paypal|cash app|wise|splitwise|refund|cashback/.test(m)) return "Transfers";
+  if (/neft|imps|rtgs|chaps|faster payment|payment received|transfer|revolut|monzo|paypal|cash app|wise|splitwise|refund|cashback/.test(m)) return "Transfers";
+  if (/credit interest|dividend|interest earned|interest credited/.test(m)) return "Income";
   return "Other";
 }
 
@@ -41,6 +77,13 @@ function categorize(merchant: string): string {
 function parseDate(raw: string, fallbackYear?: number): string | null {
   const y = fallbackYear ?? new Date().getFullYear();
   let m: RegExpMatchArray | null;
+
+  // DDMmmYYYY or DDMmmYY (no spaces, e.g. 30Mar2026, 01Apr26) — HSBC India style
+  m = raw.match(/^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{2,4})$/i);
+  if (m) {
+    const year = m[3].length === 2 ? `20${m[3]}` : m[3];
+    return `${year}-${MONTHS[m[2].toLowerCase()]}-${m[1].padStart(2, "0")}`;
+  }
 
   // DD Mon YYYY or DD Mon YY
   m = raw.match(/^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2,4})/i);
@@ -94,7 +137,12 @@ function detectStrategy(text: string): ParserStrategy {
   const dualDateCount = lines.filter((l) => dualDateRe.test(l)).length;
   if (dualDateCount >= 3) return "credit-card";
 
-  // Signal 2: explicit balance markers
+  // Signal 2a: separate Deposits + Withdrawals columns (HSBC India, DBS, SBI, ICICI style)
+  const hasDepositWithdrawal = /deposits?\s+withdrawals?|paid\s+in\s+paid\s+out|credit\s+debit\s+balance/i.test(text);
+  const hasDDMmmYYYY = /\b\d{1,2}(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\d{2,4}\b/i.test(text);
+  if (hasDepositWithdrawal || hasDDMmmYYYY) return "deposits-withdrawals";
+
+  // Signal 2b: explicit balance markers with running total
   if (/balance brought forward|balance carried forward|opening balance|closing balance/i.test(text)) {
     return "running-balance";
   }
@@ -178,8 +226,14 @@ function parseRunningBalance(text: string): ParsedTransaction[] {
   }
 
   function parseDateLine(line: string): { date: string; rest: string } | null {
+    // DDMmmYYYY (no spaces, e.g. 30Mar2026) — must check before general number patterns
+    let m = line.match(/^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{2,4})\s*(.*)/i);
+    if (m) {
+      const year = m[3].length === 2 ? `20${m[3]}` : m[3];
+      return { date: `${year}-${MONTHS[m[2].toLowerCase()]}-${m[1].padStart(2, "0")}`, rest: m[4].trim() };
+    }
     // DD Mon YY(YY)
-    let m = line.match(/^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2,4})/i);
+    m = line.match(/^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2,4})/i);
     if (m) {
       const year = m[3].length === 2 ? `20${m[3]}` : m[3];
       return { date: `${year}-${MONTHS[m[2].toLowerCase()]}-${m[1].padStart(2, "0")}`, rest: line.substring(m[0].length).trim() };
@@ -505,6 +559,145 @@ function parseCSVText(text: string): ParsedTransaction[] {
   return results;
 }
 
+// ─── Strategy 4: Deposits-Withdrawals column parser ──────────────────────────
+//
+// Handles bank statements from HSBC India, DBS, SBI, ICICI, Axis, etc. where:
+//   • Dates use DDMmmYYYY format (no spaces) e.g. "30Mar2026", "01Apr2026"
+//   • Transactions span multiple description lines
+//   • Separate columns for Deposits and Withdrawals (not a signed single amount)
+//   • Running balance column on the right
+//
+// Algorithm:
+//   1. Lines starting with DDMmmYYYY (or standard date formats) open a new tx block
+//   2. Non-date lines accumulate as description until an amount-carrying line appears
+//   3. The amount-carrying line has 1–2 numbers; last is the running balance
+//   4. Credit/debit inferred from balance delta vs previous balance
+
+function parseDepositsWithdrawals(text: string): ParsedTransaction[] {
+  const results: ParsedTransaction[] = [];
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  // Matches DDMmmYYYY at the start of a line (with optional trailing content)
+  const ddMmmRe = /^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{2,4})\s*(.*)/i;
+  // Also matches standard date formats to be inclusive
+  const stdDateRe = /^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{2,4})|^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/i;
+
+  // A line that contains 1+ decimal amounts (triggers flushing the current tx)
+  const amtLineRe = /\d{1,3}(?:,\d{2,3})*\.\d{2}/;
+
+  const skipRe = /balance brought forward|balance carried forward|opening balance|closing balance|transaction turnover|transaction count|nominee registered|micr code|ifsc code|deposits.*withdrawals|paid in.*paid out|date.*transaction.*balance|^page \d|^hsbc|^premier|^sbi|^icici|^axis|^dbs|^statement/i;
+
+  let currentDate: string | null = null;
+  let descLines: string[] = [];
+  let lastBalance: number | null = null;
+
+  function parseAmt(s: string): number { return parseFloat(s.replace(/,/g, "")); }
+
+  function pickMerchant(lines: string[]): string {
+    // Return the full raw line — stripping happens in flushTx so categorize() can see NEFT/IMPS etc.
+    for (const l of lines) {
+      if (/neft from|neft\s+from|imps from|rtgs from|upi[-\/\s]/i.test(l)) return l;
+    }
+    for (const l of lines) {
+      if (/salary|credit interest|dividend|interest/i.test(l)) return l;
+    }
+    // Skip pure transaction reference lines (e.g. TUTR2611…, FDRLN520…)
+    for (const l of lines) {
+      if (!/^[A-Z]{3,6}\d{6,}|^FDRLN|^FBLD|^\d{4}\/\d{2}\/\d{2}/.test(l) && l.length > 2) {
+        return l;
+      }
+    }
+    return lines[0] ?? "Transaction";
+  }
+
+  function flushTx(amountLine: string) {
+    if (!currentDate) return;
+    const amts = [...amountLine.matchAll(ANY_AMOUNT_RE)].map((m) => parseAmt(m[1]));
+    if (amts.length === 0) return;
+
+    const balance = amts[amts.length - 1];
+    // Transaction amount = second-to-last number, or balance delta if only one number
+    const txAmt = amts.length >= 2 ? amts[amts.length - 2] : (lastBalance !== null ? Math.abs(balance - lastBalance) : amts[0]);
+
+    const type: "credit" | "debit" = lastBalance === null || balance >= lastBalance ? "credit" : "debit";
+    lastBalance = balance;
+
+    if (txAmt < 0.005 || txAmt > 100_000_000) { descLines = []; return; }
+
+    const rawMerchant = pickMerchant(descLines);
+    const cleanMerchant = rawMerchant.replace(/^(neft|imps|rtgs)\s+from\s*/i, "").replace(/^upi[-\/\s]*/i, "").trim();
+    // Categorize against raw (pre-strip) so NEFT/IMPS/RTGS keywords are visible
+    const category = categorize(rawMerchant) !== "Other" ? categorize(rawMerchant) : categorize(cleanMerchant);
+    results.push({
+      date: currentDate!,
+      description: rawMerchant,
+      merchant: cleanMerchant,
+      amount: parseFloat(txAmt.toFixed(2)),
+      type,
+      category,
+    });
+    descLines = [];
+  }
+
+  for (const line of lines) {
+    if (skipRe.test(line)) {
+      // Capture opening balance
+      if (/balance brought forward|opening balance/i.test(line)) {
+        const amts = [...line.matchAll(ANY_AMOUNT_RE)].map((m) => parseAmt(m[1]));
+        if (amts.length > 0) lastBalance = amts[amts.length - 1];
+      }
+      continue;
+    }
+
+    // Try DDMmmYYYY first
+    const ddm = line.match(ddMmmRe);
+    if (ddm) {
+      // If this line ALSO has amounts, it might be the amount line for the previous tx
+      if (amtLineRe.test(line) && descLines.length > 0) {
+        flushTx(line);
+        // Then start new date context
+        const year = ddm[3].length === 2 ? `20${ddm[3]}` : ddm[3];
+        currentDate = `${year}-${MONTHS[ddm[2].toLowerCase()]}-${ddm[1].padStart(2, "0")}`;
+        const rest = ddm[4].trim();
+        if (rest && !amtLineRe.test(rest)) descLines = [rest];
+      } else {
+        // Pure date line opening new transaction
+        if (descLines.length > 0) flushTx("");  // flush orphans (no amount found)
+        const year = ddm[3].length === 2 ? `20${ddm[3]}` : ddm[3];
+        currentDate = `${year}-${MONTHS[ddm[2].toLowerCase()]}-${ddm[1].padStart(2, "0")}`;
+        const rest = ddm[4].trim();
+        descLines = rest ? [rest] : [];
+      }
+      continue;
+    }
+
+    // Standard date format (DD Mon YYYY, DD/MM/YYYY etc.)
+    if (stdDateRe.test(line)) {
+      if (descLines.length > 0) flushTx("");
+      const parsed = parseDate(line);
+      if (parsed) {
+        currentDate = parsed;
+        const rest = line.replace(stdDateRe, "").trim();
+        descLines = rest ? [rest] : [];
+      }
+      continue;
+    }
+
+    // Amount-carrying line → flush current transaction
+    if (amtLineRe.test(line) && currentDate) {
+      flushTx(line);
+      continue;
+    }
+
+    // Plain description continuation
+    if (currentDate && line.length > 1) {
+      descLines.push(line);
+    }
+  }
+
+  return results;
+}
+
 // ─── Main dispatcher ──────────────────────────────────────────────────────────
 
 function parseBankPDF(text: string): { transactions: ParsedTransaction[]; strategy: ParserStrategy } {
@@ -512,7 +705,21 @@ function parseBankPDF(text: string): { transactions: ParsedTransaction[]; strate
   let transactions: ParsedTransaction[];
   if (strategy === "credit-card") transactions = parseCreditCardColumns(text);
   else if (strategy === "running-balance") transactions = parseRunningBalance(text);
+  else if (strategy === "deposits-withdrawals") transactions = parseDepositsWithdrawals(text);
   else transactions = parseGeneric(text);
+
+  // If the primary strategy yielded nothing, try the others as fallbacks
+  if (transactions.length === 0 && strategy !== "generic") {
+    const fallbacks: ParserStrategy[] = ["running-balance", "deposits-withdrawals", "generic"];
+    for (const fb of fallbacks) {
+      if (fb === strategy) continue;
+      const fbTxs = fb === "running-balance" ? parseRunningBalance(text)
+        : fb === "deposits-withdrawals" ? parseDepositsWithdrawals(text)
+        : parseGeneric(text);
+      if (fbTxs.length > 0) { return { transactions: fbTxs, strategy: fb }; }
+    }
+  }
+
   return { transactions, strategy };
 }
 
@@ -660,14 +867,33 @@ router.post("/parse-pdf", async (req: Request, res: Response) => {
     if (!body.base64) { res.status(400).json({ error: "base64 field required" }); return; }
 
     const buffer = Buffer.from(body.base64, "base64");
-    // pdf-parse v2: class-based API — new PDFParse({ data }) + .getText()
+
+    // Step 1: attempt text-layer extraction via pdf-parse v2
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { PDFParse } = (globalThis as any).require("pdf-parse") as {
       PDFParse: new (opts: { data: Buffer }) => { getText(): Promise<{ text: string; total: number }> };
     };
     const parsed = await new PDFParse({ data: buffer }).getText();
-    const { transactions, strategy } = parseBankPDF(parsed.text);
-    res.json({ transactions, pageCount: parsed.total, strategy });
+
+    // Step 2: if text layer is effectively empty (image-based / scanned PDF),
+    //         fall back to OCR using pdftoppm + tesseract
+    const usefulChars = parsed.text.replace(/[-\s\n]/g, "").replace(/--\d+of\d+--/g, "").length;
+    let finalText = parsed.text;
+    let usedOcr = false;
+
+    if (usefulChars < 80) {
+      try {
+        req.log?.info("PDF has no text layer — attempting OCR");
+        finalText = await ocrPdf(buffer);
+        usedOcr = true;
+        req.log?.info({ chars: finalText.length }, "OCR complete");
+      } catch (ocrErr) {
+        req.log?.warn({ err: ocrErr }, "OCR fallback failed, using empty text");
+      }
+    }
+
+    const { transactions, strategy } = parseBankPDF(finalText);
+    res.json({ transactions, pageCount: parsed.total, strategy, usedOcr });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Parse error";
     req.log?.error({ err: e }, "PDF parse error");
