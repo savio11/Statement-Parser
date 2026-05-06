@@ -1,8 +1,13 @@
 uploads = []
-outputs = []
 
 [[generated]]
 id = "BSiX1bkCUMo0Lw7GCWyZz"
 uri = "file://artifacts/my-vault/assets/images/icon.png"
 type = "image"
 title = "my vault app icon"
+
+[[outputs]]
+id = "8KnfARI12duTFHX8ARTCP"
+uri = "file://RUN_LOCALLY.md"
+type = "text"
+title = "RUN_LOCALLY.md"
