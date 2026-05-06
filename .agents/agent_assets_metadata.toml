@@ -11,3 +11,9 @@ id = "8KnfARI12duTFHX8ARTCP"
 uri = "file://RUN_LOCALLY.md"
 type = "text"
 title = "RUN_LOCALLY.md"
+
+[[outputs]]
+id = "6udyRx6Vjsh85gmyveVgT"
+uri = "file://RUN_ON_CLOUD.md"
+type = "text"
+title = "RUN_ON_CLOUD.md"
