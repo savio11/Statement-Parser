@@ -17,3 +17,9 @@ id = "6udyRx6Vjsh85gmyveVgT"
 uri = "file://RUN_ON_CLOUD.md"
 type = "text"
 title = "RUN_ON_CLOUD.md"
+
+[[outputs]]
+id = "nGV4aK-FUBNbKGohojZdS"
+uri = "file://MY_VAULT.md"
+type = "text"
+title = "MY_VAULT.md"
